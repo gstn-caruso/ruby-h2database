@@ -14,6 +14,12 @@ module H2
         data.bytesize - offset
       end
 
+      def rewind(length)
+        raise Error.new(6, "Invalid buffer rewind") unless length >= 0 && length <= offset
+
+        @offset -= length
+      end
+
       def read(length)
         raise Error.new(6, "Truncated binary value") unless length >= 0 && length <= remaining
 

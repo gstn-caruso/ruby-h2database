@@ -8,13 +8,18 @@ module H2
 
       def initialize(store, id, name, key_type, value_type, records)
         @store, @id, @name, @key_type, @value_type = store, id, name, key_type, value_type
-        @data = records.to_h
+        load_records(records)
         @dirty = false
         @valid = true
       end
 
       def [](key)
-        @store.synchronize { check_open; @data[key_type.copy(key)] }
+        @store.synchronize do
+          check_open
+          key = key_type.copy(key)
+          position = key_position(key)
+          @records[position].last if key_found?(position, key)
+        end
       end
 
       def []=(key, value)
@@ -22,7 +27,12 @@ module H2
         @store.synchronize do
           check_open
           @store.check_writable
-          @data[key] = value
+          position = key_position(key)
+          if key_found?(position, key)
+            @records[position] = [@records[position].first, value]
+          else
+            @records.insert(position, [key, value])
+          end
           @dirty = true
         end
         value
@@ -33,25 +43,28 @@ module H2
           check_open
           @store.check_writable
           key = key_type.copy(key)
-          @dirty = true if @data.key?(key)
-          @data.delete(key)
+          position = key_position(key)
+          return nil unless key_found?(position, key)
+
+          @dirty = true
+          @records.delete_at(position).last
         end
       end
 
       def size
-        @store.synchronize { check_open; @data.size }
+        @store.synchronize { check_open; @records.size }
       end
 
       def each
         return enum_for(__method__) { size } unless block_given?
 
-        records = @store.synchronize { check_open; @data.to_a }
-        records.sort { key_type.compare(_1.first, _2.first) }.each { yield it }
+        records = @store.synchronize { check_open; snapshot }
+        records.each { yield it }
         self
       end
 
       def snapshot
-        @data.to_a
+        @records.map(&:dup)
       end
 
       def dirty?
@@ -63,7 +76,7 @@ module H2
       end
 
       def restore(records)
-        @data = records.to_h
+        load_records(records)
         @dirty = false
       end
 
@@ -72,6 +85,21 @@ module H2
       end
 
       private
+
+      def load_records(records)
+        @records = records.map(&:dup)
+        unless @records.each_cons(2).all? { |left, right| key_type.compare(left.first, right.first).negative? }
+          raise Error.new(6, "Map keys are not strictly ordered")
+        end
+      end
+
+      def key_position(key)
+        @records.bsearch_index { key_type.compare(it.first, key) >= 0 } || @records.length
+      end
+
+      def key_found?(position, key)
+        position < @records.length && key_type.compare(@records[position].first, key).zero?
+      end
 
       def check_open
         @store.check_open

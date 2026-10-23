@@ -79,18 +79,22 @@ module H2
         end
       end
 
-      def open_map(name, key_type: :string, value_type: :string)
-        key_type, value_type = Codecs.fetch(key_type), Codecs.fetch(value_type)
+      def open_map(name, key_type: nil, value_type: nil)
         name = Codecs::STRING.copy(name)
         synchronize do
           check_open
+          key_type ||= @maps[name]&.key_type
+          value_type ||= @maps[name]&.value_type
+          id = @metadata["name.#{name}"]&.to_i(16)
+          description = id ? DataUtils.parse_map(@metadata.fetch("map.#{id.to_s(16)}")) : {}
+          key_type = resolve_type(description["key"], key_type)
+          value_type = resolve_type(description["val"], value_type)
           if (map = @maps[name])
             unless map.key_type == key_type && map.value_type == value_type
               raise Error.new(5, "Map is already open with different data types")
             end
             return map
           end
-          id = @metadata["name.#{name}"]&.to_i(16)
           if id.nil?
             check_writable
             @next_map_id += 1
@@ -102,7 +106,6 @@ module H2
             @meta_dirty = true
             records = []
           else
-            description = DataUtils.parse_map(@metadata.fetch("map.#{id.to_s(16)}"))
             raise Error.new(5, "Specialized map type #{description['type']} has not been ported") if description["type"]
 
             root = DataUtils.hex(@layout, "root.#{id.to_s(16)}")
@@ -131,6 +134,7 @@ module H2
           end
           @metadata = @reader.metadata.dup
           @layout = @reader.layout.dup
+          @registered_types = nil
           @next_map_id = @reader.last_chunk ? DataUtils.hex(@reader.last_chunk.attributes, "map", 1) : 1
           @meta_dirty = false
           version
@@ -160,7 +164,26 @@ module H2
 
       private
 
+      def resolve_type(registration, requested)
+        registered = registration && registered_types.fetch(registration) { raise Error.new(6, "Missing registered storage type #{registration}") }
+        requested = Codecs.fetch(requested) if requested
+        if registered && requested && registered != requested
+          raise Error.new(5, "Requested storage codec differs from the registered type")
+        end
+        requested || registered || Codecs::STRING
+      end
+
+      def registered_types
+        @registered_types ||= begin
+          id = DataUtils.hex(@metadata, "name._")
+          raise Error.new(6, "Missing storage type registry") if id.zero?
+
+          @reader.records(DataUtils.hex(@layout, "root.#{id.to_s(16)}"), id, Codecs::STRING, Codecs::META).to_h.freeze
+        end
+      end
+
       def reload_metadata
+        @registered_types = nil
         @reader = Reader.new(@storage)
         @metadata = @reader.metadata.dup
         @layout = @reader.layout.dup
@@ -199,6 +222,7 @@ module H2
         end
         publish_header(clean: false)
         @layout = @reader.layout.dup
+        @registered_types = nil
         @meta_dirty = false
         dirty.each(&:committed)
         version
