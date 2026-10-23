@@ -8,7 +8,8 @@ class UpstreamTest < DatabaseTest
   COMPLETE_SCRIPTS = %w[datatypes/int.sql datatypes/uuid.sql functions/string/upper.sql functions/string/lower.sql
     functions/system/coalesce.sql functions/numeric/mod.sql functions/system/nullif.sql
     functions/timeanddate/dateadd.sql functions/timeanddate/datediff.sql functions/timeanddate/last_day.sql
-    functions/system/array-cat.sql functions/system/trim_array.sql functions/numeric/sign.sql functions/numeric/roundmagic.sql].freeze
+    functions/system/array-cat.sql functions/system/trim_array.sql functions/numeric/sign.sql functions/numeric/roundmagic.sql
+    functions/numeric/bitget.sql functions/numeric/lshift.sql functions/numeric/rshift.sql functions/numeric/rotate.sql].freeze
 
   COMPLETE_SCRIPTS.each do |path|
     define_method("test_complete_#{path.tr('/.', '__')}") do
@@ -183,6 +184,30 @@ class UpstreamTest < DatabaseTest
       execute("CREATE TABLE TEST(D #{type})")
       execute("INSERT INTO TEST VALUES('-Infinity'),('-1'),('0'),('1'),('1.5'),('Infinity'),('NaN')")
       script = UpstreamScript.new(File.join(ROOT,"datatypes/#{name}.sql"))
+      selection.each { check_case(script.cases.fetch(it)) }
+    end
+  end
+
+  def test_original_bit_logical_functions_except_explain
+    %w[bitand bitor bitxor].each do |name|
+      script = UpstreamScript.new(File.join(ROOT,"functions/numeric/#{name}.sql"))
+      [0,1,2,3,5,*(12..15)].each { check_case(script.cases.fetch(it)) }
+    end
+  end
+
+  def test_original_bit_not_except_explain
+    script = UpstreamScript.new(File.join(ROOT,'functions/numeric/bitnot.sql'))
+    [0,1,3,5].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_bit_count_except_explain
+    script = UpstreamScript.new(File.join(ROOT,'functions/numeric/bitcount.sql'))
+    [0,*(2..5)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_bit_aggregates_except_index_plans_and_windows
+    {'bit_and_agg'=>[0,1,2,3,5,6,10],'bit_or_agg'=>[0,1,2,3,5,6,8],'bit_xor_agg'=>[0,1,2,4]}.each do |name,selection|
+      script = UpstreamScript.new(File.join(ROOT,"functions/aggregate/#{name}.sql"))
       selection.each { check_case(script.cases.fetch(it)) }
     end
   end

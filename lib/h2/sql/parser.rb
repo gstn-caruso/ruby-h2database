@@ -1065,6 +1065,9 @@ module H2
           if MathFunctions::ARITIES.key?(name) && (distinct || !MathFunctions::ARITIES.fetch(name).cover?(arguments.length))
             raise Error.new(42001, "Invalid #{name} arguments")
           end
+          if BitFunctions::ARITIES.key?(name) && (distinct || !BitFunctions::ARITIES.fetch(name).cover?(arguments.length))
+            raise Error.new(42001, "Invalid #{name} arguments")
+          end
           if %w[ARRAY_GET ARRAY_APPEND ARRAY_CAT].include?(name)
             raise Error.new(7001, "#{name} requires two arguments") unless arguments.length == 2
 
@@ -1132,6 +1135,9 @@ module H2
         distinct = accept("DISTINCT")
         accept("ALL") unless distinct
         arguments = keyword?(")") ? [] : list { expression }
+        if BitFunctions::AGGREGATES.key?(name) && arguments.length != 1
+          raise Error.new(42001, "Bit aggregate requires one argument")
+        end
         order = []
         if name == "ARRAY_AGG" && accept("ORDER")
           expect("BY")

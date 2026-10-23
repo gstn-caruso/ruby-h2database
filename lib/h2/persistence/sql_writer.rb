@@ -90,6 +90,8 @@ module H2
             "CAST(#{text} AS #{type(node.type)})"
           elsif node.value.is_a?(Integer) && Type::INTEGER_LIMITS.key?(node.type.name)
             "CAST(#{node.value} AS #{type(node.type)})"
+          elsif BinaryString.binary?(node.value) && node.type.name == "BINARY"
+            "CAST(#{literal(node.value)} AS #{type(node.type)})"
           elsif node.value.is_a?(BigDecimal) && node.type.name == "NUMERIC"
             text = ArrayType.decimal_text(node.value, node.type.scale)
             node.cast ? "CAST(#{text} AS #{type(node.type)})" : text

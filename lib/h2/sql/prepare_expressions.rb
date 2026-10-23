@@ -21,7 +21,15 @@ module H2
         end
         return prepare_case(node) if node.is_a?(CaseExpression)
         node = node.with(**node.to_h.transform_values { prepare(it) })
+        if node.is_a?(Aggregate) && BitFunctions::AGGREGATES.key?(node.name) && statically_typed?(node.arguments.first)
+          BitFunctions.check_type(@evaluator.type_of(node.arguments.first))
+        end
         @evaluator.validate(node) if node.is_a?(Function) && node.name == "MOD" && statically_typed?(node)
+        if node.is_a?(Function) && BitFunctions::ARITIES.key?(node.name) && statically_typed?(node)
+          @evaluator.validate(node)
+          expression = @evaluator.prepared_bits(node).first
+          return prepare(expression) unless expression == node
+        end
         if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name) && statically_typed?(node)
           @evaluator.validate(node)
           expression = @evaluator.prepared_math(node).first
@@ -59,6 +67,7 @@ module H2
         @evaluator.validate(node)
         type = @evaluator.type_of(node)
         value = @evaluator.evaluate(node)
+        return BitFunctions.literal(value, type) if node.is_a?(Function) && BitFunctions::ARITIES.key?(node.name)
         if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name)
           return MathFunctions.literal(value, type)
         end
@@ -184,6 +193,7 @@ module H2
       end
 
       def relevant?(node)
+        return true if node.is_a?(Function) && BitFunctions::ARITIES.key?(node.name)
         return true if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name)
         return true if node.is_a?(Function) && node.name == "SIGN"
         return true if node.is_a?(Function) && node.name == "MOD"

@@ -8,7 +8,8 @@ module H2
         "UPPER" => 1..1, "UCASE" => 1..1, "LOWER" => 1..1, "LCASE" => 1..1, "LENGTH" => 1..1, "CHAR_LENGTH" => 1..1,
         "OCTET_LENGTH" => 1..1, "BIT_LENGTH" => 1..1,
         "ABS" => 1..1, "SIGN" => 1..1, "COALESCE" => 1..Float::INFINITY, "IFNULL" => 2..2, "NULLIF" => 2..2, "MOD" => 2..2,
-        "EXTRACT" => 2..2, "DATE_TRUNC" => 2..2, "LAST_DAY" => 1..1, "DATEADD" => 3..3, "DATEDIFF" => 3..3}.merge(ArrayFunctions::ARITIES).merge(MathFunctions::ARITIES).freeze
+        "EXTRACT" => 2..2, "DATE_TRUNC" => 2..2, "LAST_DAY" => 1..1, "DATEADD" => 3..3, "DATEDIFF" => 3..3}.merge(ArrayFunctions::ARITIES).merge(MathFunctions::ARITIES)
+          .merge(BitFunctions::ARITIES).merge(BitFunctions::AGGREGATES.keys.to_h { [it, 1..1] }).freeze
 
       attr_reader :scope, :outer_bindings, :context
 
@@ -23,6 +24,7 @@ module H2
         @group_correlations = []
         @cases = {}
         @math = {}
+        @bits = {}
       end
 
       def validate(node, aggregates: false, inside_aggregate: false)
@@ -84,6 +86,7 @@ module H2
           function_type(node) if ArrayFunctions::ARITIES.key?(node.name)
           function_type(node) if MathFunctions::ARITIES.key?(node.name)
           function_type(node) if node.name == "MOD"
+          function_type(node) if BitFunctions::ARITIES.key?(node.name) || BitFunctions::AGGREGATES.key?(node.name)
         when Default, Star
           raise Error.new(42000, "Invalid expression #{node.class.name.split('::').last}")
         else
@@ -537,6 +540,18 @@ module H2
       end
 
       def optimized_expression(node)
+        if node.is_a?(Cast) && BitFunctions::BINARY.include?(node.type.name) && constant?(node)
+          value = evaluate(node)
+          cast = value.nil? || node.type.precision != value.bytesize
+          return TypedLiteral.new(value, node.type, cast)
+        end
+        if node.is_a?(Function) && BitFunctions::ARITIES.key?(node.name)
+          expression, type = prepared_bits(node)
+          return optimized_expression(expression) unless expression == node
+          return BitFunctions.literal(evaluate(node), type) if constant?(node)
+
+          return node.with(arguments: node.arguments.map { optimized_expression(it) })
+        end
         if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name)
           expression, type = prepared_math(node)
           return optimized_expression(expression) unless expression == node
@@ -629,6 +644,10 @@ module H2
           end
           [expression, type || type_of(expression)]
         end
+      end
+
+      public def prepared_bits(node)
+        @bits[node] ||= [BitFunctions.simplify(node), BitFunctions.type(node.name, node.arguments.map { type_of(it) })]
       end
 
       private
@@ -933,6 +952,8 @@ module H2
       end
 
       def function_type(node)
+        return prepared_bits(node).last if BitFunctions::ARITIES.key?(node.name)
+        return BitFunctions.check_type(type_of(node.arguments.first)) if BitFunctions::AGGREGATES.key?(node.name)
         if MathFunctions::ARITIES.key?(node.name)
           expression, type = prepared_math(node)
           return type unless expression == node && constant?(node)
@@ -1190,6 +1211,12 @@ module H2
 
       def function(node, row, group)
         return aggregate(node, group) if AGGREGATES.include?(node.name)
+        if BitFunctions::ARITIES.key?(node.name)
+          expression, type = prepared_bits(node)
+          return evaluate(expression, row, group) unless expression == node
+
+          return BitFunctions.evaluate(node.name, type, node.arguments.map { type_of(it) }, ->(index) { evaluate(node.arguments[index], row, group) })
+        end
         if MathFunctions::ARITIES.key?(node.name)
           expression, type = prepared_math(node)
           return evaluate(expression, row, group) unless expression == node
@@ -1295,6 +1322,7 @@ module H2
         end
         return values.length if node.name == "COUNT"
         return nil if values.empty?
+        return BitFunctions.aggregate(node.name, values, function_type(node)) if BitFunctions::AGGREGATES.key?(node.name)
         if %w[SUM AVG].include?(node.name) && function_type(node).name == "DECFLOAT"
           type = function_type(node)
           values = values.map { DecfloatValue.convert(it, source_type: type_of(argument)) }

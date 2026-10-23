@@ -198,6 +198,21 @@ end
 
 NaN equals itself and sorts after positive infinity. Zero signs normalize to positive zero; NaN values remain consistent in keys, grouping, DISTINCT and set operations. SUM and AVG of REAL produce DOUBLE, with sequential addition and H2's sorted order for DISTINCT inputs. Arithmetic defaults, CTAS and NaN keys reopen through native storage and JDBC. Other numeric functions and complete parameter inference, composite metadata and optimizer behavior remain migration work.
 
+## Bit functions
+
+`BITAND`, `BITOR`, `BITXOR`, `BITNOT`, `BITNAND`, `BITNOR` and `BITXNOR` accept TINYINT, SMALLINT, INTEGER, BIGINT, BINARY and VARBINARY. Integer results retain their signed width. Binary operands align at the first byte; a fixed BINARY operand determines the result precision when mixed with VARBINARY.
+
+`BITGET` tests a bit and `BITCOUNT` counts set bits. `LSHIFT` / `RSHIFT` retain the sign on integer right shifts; `ULSHIFT` / `URSHIFT` fill with zero. `ROTATELEFT` / `ROTATERIGHT` wrap within the value's width. Negative offsets reverse the direction. Binary shifts use big-endian byte order; BITGET counts from the low bit of each successive byte. H2's BIGINT BITGET masks nonnegative offsets modulo 64, while smaller integers return false beyond their width.
+
+```ruby
+H2.connect do |connection|
+  p connection.execute("SELECT LSHIFT(CAST(? AS TINYINT),?),BITCOUNT(CAST(? AS TINYINT))", 1, 7, -1).rows
+  # => [[-128, 8]]
+end
+```
+
+The six aggregates `BIT_AND_AGG`, `BIT_OR_AGG`, `BIT_XOR_AGG`, `BIT_NAND_AGG`, `BIT_NOR_AGG` and `BIT_XNOR_AGG` support DISTINCT and FILTER, skip SQL NULL and return NULL for empty groups. Inverse forms negate the final aggregate. Functions, aggregate defaults and captured parameters retain widths and fixed binary operands across native/JDBC reopen and CLI invocations. Window aggregates and general EXPLAIN plans remain pending.
+
 ## Rounding numbers and truncating dates
 
 `ROUND(value[, scale])` rounds decimal ties away from zero. `TRUNC` / `TRUNCATE` discard the fractional part toward zero; `FLOOR` rounds down and `CEIL` / `CEILING` round up. A negative scale selects digits before the decimal point. Scales range from -100,000 to 100,000; invalid scales raise 90008, and integer overflow raises 22003.
