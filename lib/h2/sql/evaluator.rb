@@ -7,7 +7,7 @@ module H2
       FUNCTIONS = {"COUNT" => 1..1, "SUM" => 1..1, "AVG" => 1..1, "MIN" => 1..1, "MAX" => 1..1, "ARRAY_AGG" => 1..1,
         "UPPER" => 1..1, "UCASE" => 1..1, "LOWER" => 1..1, "LCASE" => 1..1, "LENGTH" => 1..1, "CHAR_LENGTH" => 1..1,
         "OCTET_LENGTH" => 1..1, "BIT_LENGTH" => 1..1,
-        "ABS" => 1..1, "COALESCE" => 1..Float::INFINITY, "IFNULL" => 2..2, "NULLIF" => 2..2, "MOD" => 2..2,
+        "ABS" => 1..1, "SIGN" => 1..1, "COALESCE" => 1..Float::INFINITY, "IFNULL" => 2..2, "NULLIF" => 2..2, "MOD" => 2..2,
         "EXTRACT" => 2..2, "DATE_TRUNC" => 2..2, "LAST_DAY" => 1..1, "DATEADD" => 3..3, "DATEDIFF" => 3..3}.merge(ArrayFunctions::ARITIES).freeze
 
       attr_reader :scope, :outer_bindings, :context
@@ -76,9 +76,6 @@ module H2
             aggregate_order(node)
           end
           argument_type = type_of(node.arguments.first)
-          if %w[SUM AVG ABS MOD].include?(node.name) && node.arguments.any? { type_of(it)&.name == "DECFLOAT" }
-            raise Error.new(50100, "DECFLOAT numeric functions have not yet been ported")
-          end
           if %w[SUM AVG].include?(node.name) && (argument_type.is_a?(ArrayType) || (%w[BINARY VARBINARY UUID JSON] + Temporal::NAMES).include?(argument_type&.name))
             raise Error.new(90015, "Invalid type for #{node.name}")
           end
@@ -94,9 +91,7 @@ module H2
             Type.check_comparable(type_of(node.left), type_of(node.right))
           elsif node.is_a?(Binary) && %w[+ - * / %].include?(node.operator)
             type = type_of(node)
-            if type.name == "DECFLOAT"
-              raise Error.new(50100, "DECFLOAT arithmetic has not yet been ported")
-            elsif type.is_a?(ArrayType)
+            if type.is_a?(ArrayType)
               code = children(node).all? { constant?(it) } ? 50100 : 50000
               raise Error.new(code, "Arithmetic on arrays is unavailable")
             elsif %w[BINARY VARBINARY UUID JSON].include?(type.name)
@@ -492,7 +487,11 @@ module H2
           return TemporalOperations.type(node.operator, *types) if types.any? { Temporal::NAMES.include?(it&.name) }
 
           type = Type.common(types)
-          return NumericOperations.type(node.operator, *types) if type.name == "NUMERIC"
+          if node.operator == "%" && type.name == "DECFLOAT"
+            return types.last if (%w[NUMERIC REAL DOUBLE DECFLOAT] + Type::INTEGER_LIMITS.keys).include?(types.last.name)
+            return type
+          end
+          return NumericOperations.type(node.operator, *types) if %w[NUMERIC DECFLOAT].include?(type.name)
           type
         end
       end
@@ -547,7 +546,7 @@ module H2
         end
         if node.is_a?(Binary) && %w[+ - * /].include?(node.operator) && constant?(node)
           type = type_of(node)
-          if type.name == "NUMERIC" || Type::INTEGER_LIMITS.key?(type.name)
+          if %w[NUMERIC DECFLOAT].include?(type.name) || Type::INTEGER_LIMITS.key?(type.name)
             return NumericOperations.literal(evaluate(node), type)
           end
         end
@@ -899,13 +898,19 @@ module H2
         if %w[SUM AVG].include?(node.name) && argument_type && Intervals.name?(argument_type.name)
           return IntervalOperations.aggregate_type(node.name, argument_type)
         end
+        if %w[SUM AVG].include?(node.name) && %w[DOUBLE DECFLOAT].include?(argument_type&.name)
+          return Type.new("DECFLOAT", [Type.decfloat_precision(argument_type) + 10, 100_000].min, 0)
+        end
         case node.name
         when "ARRAY_AGG" then ArrayType.new(argument_type, ArrayValue::MAX_CARDINALITY)
         when "COUNT", "LENGTH", "CHAR_LENGTH", "OCTET_LENGTH", "BIT_LENGTH" then Type.new("BIGINT", nil, 0)
         when "UPPER", "UCASE", "LOWER", "LCASE" then Type.new("VARCHAR", nil, nil)
+        when "SIGN" then Type.new("INTEGER", nil, 0)
         when "ABS", "MIN", "MAX", "NULLIF" then argument_type
         when "COALESCE", "IFNULL" then Type.common(node.arguments.map { type_of(it) })
-        when "MOD" then type_of(node.arguments.last)
+        when "MOD"
+          divisor_type = type_of(node.arguments.last)
+          (%w[NUMERIC REAL DOUBLE DECFLOAT] + Type::INTEGER_LIMITS.keys).include?(divisor_type.name) ? divisor_type : Type.common(node.arguments.map { type_of(it) })
         when "SUM"
           return nil unless argument_type
           case argument_type.name
@@ -992,6 +997,17 @@ module H2
           end
           if [left_type, right_type].any? { Temporal::NAMES.include?(it&.name) }
             return TemporalOperations.evaluate(node.operator, left, right, left_type, right_type, context: context)
+          end
+          if Type.common([left_type, right_type]).name == "DECFLOAT"
+            left = DecfloatValue.convert(left, source_type: left_type)
+            right = DecfloatValue.convert(right, source_type: right_type)
+            return case node.operator
+            when "+" then left.add(right)
+            when "-" then left.subtract(right)
+            when "*" then left.multiply(right)
+            when "/" then left.divide(right, type_of(node).precision)
+            when "%" then type_of(node).coerce(left.remainder(right))
+            end
           end
         end
         if %w[= <> != < > <= >=].include?(node.operator) && (left.is_a?(RowValue) ^ right.is_a?(RowValue))
@@ -1135,8 +1151,22 @@ module H2
         when "OCTET_LENGTH", "BIT_LENGTH"
           length = BinaryString.encode(first, source_type: type_of(node.arguments.first)).bytesize
           node.name == "BIT_LENGTH" ? length * 8 : length
-        when "ABS" then first.is_a?(IntervalValue) ? (first.negative ? first.negate : first) : check_integer(numeric(first).abs, node)
+        when "ABS"
+          return first.abs if first.is_a?(DecfloatValue)
+
+          first.is_a?(IntervalValue) ? (first.negative ? first.negate : first) : check_integer(numeric(first).abs, node)
+        when "SIGN"
+          return first.signum if first.is_a?(DecfloatValue)
+          return first.absolute <=> 0 if first.is_a?(IntervalValue)
+          raise Error.new(50100, "SIGN is unavailable for this value type") unless first.is_a?(Numeric)
+
+          first.respond_to?(:nan?) && first.nan? ? 0 : first <=> 0
         when "MOD"
+          types = node.arguments.map { type_of(it) }
+          if Type.common(types).name == "DECFLOAT"
+            first, second = values.zip(types).map { |value, type| DecfloatValue.convert(value, source_type: type) }
+            return function_type(node).coerce(first.remainder(second))
+          end
           raise Error.new(22012, "Division by zero") if numeric(second).zero?
 
           numeric(first).remainder(numeric(second))
@@ -1155,6 +1185,15 @@ module H2
         values = values.uniq { Temporal.comparison_key(it) } if node.distinct
         return values.length if node.name == "COUNT"
         return nil if values.empty?
+        if %w[SUM AVG].include?(node.name) && function_type(node).name == "DECFLOAT"
+          type = function_type(node)
+          values = values.map { DecfloatValue.convert(it, source_type: type_of(argument)) }
+          if node.name == "AVG" && values.any? { !it.finite? }
+            raise Error.new(22018, "Non-finite DECFLOAT cannot convert to NUMERIC for AVG")
+          end
+          sum = values.reduce { _1.add(_2) }
+          return node.name == "SUM" ? sum : sum.divide(DecfloatValue.parse(values.length.to_s), type.precision)
+        end
         if %w[SUM AVG].include?(node.name) && Intervals.name?(type_of(argument).name)
           type = function_type(node)
           qualifier = Intervals.qualifier(type)

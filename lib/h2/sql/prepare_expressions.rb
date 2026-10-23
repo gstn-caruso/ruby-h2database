@@ -63,6 +63,16 @@ module H2
         if !node.is_a?(Cast) && Temporal.value?(value)
           type = Temporal.type(Temporal.name(value), 9)
         end
+        return Literal.new(value) if value.is_a?(DecfloatValue) && !node.is_a?(Cast)
+        operands = if node.is_a?(Function) && node.name == "MOD"
+          node.arguments
+        elsif node.is_a?(Binary) && node.operator == "%"
+          [node.left, node.right]
+        end
+        if value.is_a?(BigDecimal) && operands && Type.common(operands.map { @evaluator.type_of(it) }).name == "DECFLOAT"
+          return NumericOperations.literal(value, Type.new("NUMERIC", nil, [value.scale, 0].max))
+        end
+
         TypedLiteral.new(value, type, cast)
       end
 
@@ -151,7 +161,8 @@ module H2
       end
 
       def relevant?(node)
-        return true if node.is_a?(Literal) && node.value.is_a?(JsonValue)
+        return true if node.is_a?(Function) && node.name == "SIGN"
+        return true if node.is_a?(Literal) && (node.value.is_a?(JsonValue) || node.value.is_a?(DecfloatValue))
         return true if [JsonFormat, JsonPredicate, TypePredicate, JsonConstructor].any? { node.is_a?(it) }
         return true if node.is_a?(Cast) && node.type.name == "JSON"
         return true if node.is_a?(Cast) && node.type.name == "DECFLOAT"

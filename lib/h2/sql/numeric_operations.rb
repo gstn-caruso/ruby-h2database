@@ -6,6 +6,11 @@ module H2
       module_function
 
       def type(operator, left, right)
+        if Type.common([left, right]).name == "DECFLOAT"
+          precisions = [left, right].map { Type.decfloat_precision(it) }
+          precision = operator == "*" ? precisions.sum : precisions.max + 1
+          return Type.new("DECFLOAT", [precision, 100_000].min, 0)
+        end
         p1, s1 = Type.numeric_info(left)
         p2, s2 = Type.numeric_info(right)
         case operator
@@ -37,6 +42,7 @@ module H2
 
       def literal(value, type)
         return TypedLiteral.new(nil, type, true) if value.nil?
+        return Literal.new(value) if value.is_a?(DecfloatValue)
         return TypedLiteral.new(value, type, false) unless type.name == "NUMERIC"
 
         digits = ArrayType.decimal_text(value, type.scale).delete('-.').sub(/\A0+/, '')
