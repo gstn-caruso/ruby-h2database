@@ -8,7 +8,7 @@ class UpstreamTest < DatabaseTest
   COMPLETE_SCRIPTS = %w[datatypes/int.sql datatypes/uuid.sql functions/string/upper.sql functions/string/lower.sql
     functions/system/coalesce.sql functions/numeric/mod.sql functions/system/nullif.sql
     functions/timeanddate/dateadd.sql functions/timeanddate/datediff.sql functions/timeanddate/last_day.sql
-    functions/system/array-cat.sql functions/system/trim_array.sql].freeze
+    functions/system/array-cat.sql functions/system/trim_array.sql functions/numeric/sign.sql functions/numeric/roundmagic.sql].freeze
 
   COMPLETE_SCRIPTS.each do |path|
     define_method("test_complete_#{path.tr('/.', '__')}") do
@@ -161,6 +161,23 @@ class UpstreamTest < DatabaseTest
     [*(10..16), *(27..40)].each { check_case(script.cases.fetch(it)) }
   end
 
+  def test_original_floor_and_ceiling_except_information_schema
+    {"floor" => [*(0..5),7],"ceil" => [*(0..6),8]}.each do |name, selection|
+      script = UpstreamScript.new(File.join(ROOT,"functions/numeric/#{name}.sql"))
+      selection.each { check_case(script.cases.fetch(it)) }
+    end
+  end
+
+  def test_original_round_except_call_and_information_schema
+    script = UpstreamScript.new(File.join(ROOT,"functions/numeric/round.sql"))
+    [*(0..2),5,6,*(16..18),*(20..28)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_truncate_except_information_schema
+    script = UpstreamScript.new(File.join(ROOT,"functions/numeric/truncate.sql"))
+    [*(0..23),*(25..27)].each { check_case(script.cases.fetch(it)) }
+  end
+
   def test_original_json_array_except_plans_and_string_helpers
     script = UpstreamScript.new(File.join(ROOT, "functions/json/json_array.sql"))
     [*(0..6), 10, *(15..21)].each { check_case(script.cases.fetch(it)) }
@@ -222,6 +239,7 @@ class UpstreamTest < DatabaseTest
         "#{integer}.#{fraction.to_s.ljust(type.scale, '0')}"
       else text
       end
+    when Float then H2::JsonValue.float_text(value, real: type&.name == "REAL")
     when String then H2::BinaryString.binary?(value) ? "X'#{value.unpack1('H*')}'" : value.gsub("\r\n", "\n").tr("\n", " ").gsub(/ +/, " ")
     else value.to_s
     end

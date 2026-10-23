@@ -177,6 +177,21 @@ Arithmetic supports `+`, `-`, `*`, `/`, `%`, `ABS`, `SIGN` and `MOD`, including 
 
 Columns, CTAS, key indexes, arrays and dynamic arithmetic/aggregate defaults retain values and operand precision across native/JDBC file reopen. Remaining numeric functions, aliases, conversions and full metadata/optimizer behavior are still migration work.
 
+## Rounding numbers and truncating dates
+
+`ROUND(value[, scale])` rounds decimal ties away from zero. `TRUNC` / `TRUNCATE` discard the fractional part toward zero; `FLOOR` rounds down and `CEIL` / `CEILING` round up. A negative scale selects digits before the decimal point. Scales range from -100,000 to 100,000; invalid scales raise 90008, and integer overflow raises 22003.
+
+```ruby
+H2.connect do |connection|
+  result = connection.execute("SELECT ROUND(CAST(? AS NUMERIC(8,3)),2) AS rounded", BigDecimal("1.255"))
+  p result.rows.first.first.to_s("F") # => "1.26"
+end
+```
+
+Results retain the numeric family. A constant scale can reduce NUMERIC result scale; a scale read from a column or parameter keeps the input scale and adjusts precision. The CLI formats declared decimal scales and REAL's 32-bit representation. Use an explicit cast for a rounding argument supplied as a parameter, as in the example. SQL NULL propagates; constant scale/type errors are checked during preparation. REAL/DOUBLE `NaN` and infinities survive FLOOR, CEIL and zero-scale TRUNC; decimal rounding of non-finite values fails with 22018. Float parameters accept these specials, and conversion of floating-point NaN to an integer yields zero.
+
+`TRUNC` also resets DATE, TIMESTAMP and TIMESTAMP WITH TIME ZONE values to midnight, retaining a timestamp's offset. DATE results use TIMESTAMP(0). Text is first cast to TIMESTAMP(0), so a fractional second near midnight can round into the following day before truncation. Temporal TRUNC accepts one argument. `ROUNDMAGIC` implements H2's DOUBLE correction for decimal artifacts; it is separate from ordinary ROUND.
+
 ## Dates and times
 
 `DATE`, `TIME[(0..9)]` and `TIMESTAMP[(0..9)]` store calendar and wall-clock values without a time zone. Results use immutable `H2::DateValue`, `H2::TimeValue` and `H2::TimestampValue` objects, with canonical text from `.to_s`. Dates cover H2's Gregorian year range from -1,000,000,000 through 1,000,000,000. Times retain nanoseconds; column assignment and casts round to their declared scale, which defaults to 0 for TIME and 6 for TIMESTAMP.

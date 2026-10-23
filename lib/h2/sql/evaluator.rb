@@ -8,7 +8,7 @@ module H2
         "UPPER" => 1..1, "UCASE" => 1..1, "LOWER" => 1..1, "LCASE" => 1..1, "LENGTH" => 1..1, "CHAR_LENGTH" => 1..1,
         "OCTET_LENGTH" => 1..1, "BIT_LENGTH" => 1..1,
         "ABS" => 1..1, "SIGN" => 1..1, "COALESCE" => 1..Float::INFINITY, "IFNULL" => 2..2, "NULLIF" => 2..2, "MOD" => 2..2,
-        "EXTRACT" => 2..2, "DATE_TRUNC" => 2..2, "LAST_DAY" => 1..1, "DATEADD" => 3..3, "DATEDIFF" => 3..3}.merge(ArrayFunctions::ARITIES).freeze
+        "EXTRACT" => 2..2, "DATE_TRUNC" => 2..2, "LAST_DAY" => 1..1, "DATEADD" => 3..3, "DATEDIFF" => 3..3}.merge(ArrayFunctions::ARITIES).merge(MathFunctions::ARITIES).freeze
 
       attr_reader :scope, :outer_bindings, :context
 
@@ -22,6 +22,7 @@ module H2
         @outer_bindings = []
         @group_correlations = []
         @cases = {}
+        @math = {}
       end
 
       def validate(node, aggregates: false, inside_aggregate: false)
@@ -81,6 +82,7 @@ module H2
           end
           function_type(node) if datetime_function?(node)
           function_type(node) if ArrayFunctions::ARITIES.key?(node.name)
+          function_type(node) if MathFunctions::ARITIES.key?(node.name)
         when Default, Star
           raise Error.new(42000, "Invalid expression #{node.class.name.split('::').last}")
         else
@@ -117,6 +119,10 @@ module H2
       end
 
       def session_dependent?(node)
+        if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name)
+          expression = prepared_math(node).first
+          return session_dependent?(expression) unless expression == node
+        end
         return true if node.is_a?(CurrentDateTime)
         if node.is_a?(TimeZoneExpression)
           return true if node.zone.nil? || !type_of(node.expression).name.end_with?("WITH TIME ZONE")
@@ -158,6 +164,10 @@ module H2
 
       def validate_grouping(node, groups)
         return unless node
+        if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name)
+          expression = prepared_math(node).first
+          return validate_grouping(expression, groups) unless expression == node
+        end
         return if groups.any? { canonical(it) == canonical(node) }
         return if node.is_a?(Aggregate) || (node.is_a?(Function) && AGGREGATES.include?(node.name))
         if node.is_a?(Subquery) || node.is_a?(Exists) || node.is_a?(InQuery) || node.is_a?(ArrayQuery)
@@ -522,6 +532,11 @@ module H2
       end
 
       def optimized_expression(node)
+        if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name)
+          expression, type = prepared_math(node)
+          return optimized_expression(expression) unless expression == node
+          return MathFunctions.literal(evaluate(node), type) if constant?(node)
+        end
         if [JsonFormat, JsonPredicate, TypePredicate, JsonConstructor].any? { node.is_a?(it) } && constant?(node)
           value = evaluate(node)
           return TypedLiteral.new(value, type_of(node), value.nil? && !node.is_a?(JsonFormat))
@@ -574,6 +589,40 @@ module H2
           node.with(arguments: node.arguments.map { optimized_expression(it) })
         else
           node
+        end
+      end
+
+      private
+
+      public def prepared_math(node)
+        @math[node] ||= begin
+          call = node
+          argument_type = type_of(call.arguments.first)
+          if call.name == "TRUNC" && argument_type.name == "VARCHAR" && constant?(call.arguments.first)
+            target = Temporal.type("TIMESTAMP", 0)
+            value = evaluate(Cast.new(call.arguments.first, target))
+            call = call.with(arguments: [TypedLiteral.new(value, target, true), *call.arguments.drop(1)])
+            argument_type = target
+          end
+          temporal = call.name == "TRUNC" && MathFunctions::TEMPORAL_TRUNC.include?(argument_type.name)
+          scale_argument = call.arguments[1] unless temporal || %w[FLOOR CEIL ROUNDMAGIC].include?(call.name)
+          known_scale = scale_argument.nil? || constant?(scale_argument)
+          scale_value = scale_argument ? (evaluate(scale_argument) if known_scale) : 0
+          scale_value = MathFunctions.scale(scale_value) if known_scale && !scale_value.nil? && !temporal && call.name != "ROUNDMAGIC"
+          expression, type = MathFunctions.plan(call, argument_type, known_scale: known_scale, scale_value: scale_value)
+          if expression != call && constant?(expression)
+            if Type::INTEGER_LIMITS.key?(type&.name)
+              expression = MathFunctions.literal(evaluate(expression), type)
+            elsif type&.name == "NUMERIC"
+              value = evaluate(expression)
+              literal = MathFunctions.literal(value, type)
+              actual = type_of(literal)
+              expression = [type.precision,type.scale] == [actual.precision,actual.scale] ? literal : TypedLiteral.new(value,type,true)
+            elsif expression.is_a?(Cast) && expression.type.name == "TIMESTAMP"
+              expression = TypedLiteral.new(evaluate(expression), expression.type, true)
+            end
+          end
+          [expression, type || type_of(expression)]
         end
       end
 
@@ -850,6 +899,10 @@ module H2
       end
 
       def canonical(node)
+        if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name)
+          expression = prepared_math(node).first
+          return canonical(expression) unless expression == node
+        end
         case node
         when ColumnRef then BoundColumn.new(scope.resolve(node))
         when Unary then node.with(operand: canonical(node.operand))
@@ -874,6 +927,12 @@ module H2
       end
 
       def function_type(node)
+        if MathFunctions::ARITIES.key?(node.name)
+          expression, type = prepared_math(node)
+          return type unless expression == node && constant?(node)
+
+          return type_of(MathFunctions.literal(evaluate(node), type))
+        end
         if ArrayFunctions::ARITIES.key?(node.name)
           type = ArrayFunctions.type(node.name, type_of(node.arguments.first))
           if constant?(node) && (value = evaluate(node))
@@ -1112,6 +1171,19 @@ module H2
 
       def function(node, row, group)
         return aggregate(node, group) if AGGREGATES.include?(node.name)
+        if MathFunctions::ARITIES.key?(node.name)
+          expression, type = prepared_math(node)
+          return evaluate(expression, row, group) unless expression == node
+
+          value = evaluate(node.arguments.first, row, group)
+          return nil if value.nil?
+
+          scale = node.arguments.length > 1 ? evaluate(node.arguments[1], row, group) : 0
+          return nil if scale.nil?
+
+          scale = MathFunctions.scale(scale) unless node.name == "ROUNDMAGIC"
+          return MathFunctions.evaluate(node.name, value, type, scale, type_of(node.arguments.first))
+        end
         if ArrayFunctions::ARITIES.key?(node.name)
           return ArrayFunctions.evaluate(node.name, type_of(node.arguments.first),
             ->(index) { evaluate(node.arguments[index], row, group) },

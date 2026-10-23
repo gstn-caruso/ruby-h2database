@@ -217,6 +217,15 @@ schema.concat([
 ])
 queries.concat(["TABLE decimal_defaults ORDER BY v", "TABLE decimal_results", "SELECT SUM(a) AS s,AVG(b) AS a FROM decimal_operands"])
 changes.concat(["UPDATE decimal_operands SET b=8", "INSERT INTO decimal_defaults DEFAULT VALUES", "INSERT INTO decimal_results SELECT a+b,a-b,a*b,a/b FROM decimal_operands"])
+schema.concat([
+  "CREATE TABLE rounding_source(n NUMERIC(8,3),s INT,d DATE,z TIMESTAMP(9) WITH TIME ZONE)",
+  "INSERT INTO rounding_source VALUES(1.255,2,DATE '2000-02-29',TIMESTAMP WITH TIME ZONE '2000-02-29 12:34:56+03')",
+  "CREATE TABLE rounding_saved(n NUMERIC(9,3) DEFAULT (SELECT ROUND(n,s) FROM rounding_source),d DECFLOAT(8) DEFAULT TRUNC(1.255E0,2),r BOOLEAN DEFAULT (SELECT FLOOR(CAST(1.5 AS REAL)) FROM rounding_source) IS OF(REAL),i BOOLEAN DEFAULT (SELECT ROUND(CAST(15 AS TINYINT),-1) FROM rounding_source) IS OF(TINYINT),z TIMESTAMP WITH TIME ZONE DEFAULT (SELECT TRUNC(z) FROM rounding_source),special DOUBLE DEFAULT FLOOR(CAST('NaN' AS DOUBLE)))",
+  "INSERT INTO rounding_saved DEFAULT VALUES",
+  "CREATE TABLE rounding_results AS SELECT ROUND(n,-1) AS a,ROUND(n,1) AS b,TRUNC(n,s) AS c,FLOOR(n) AS d,CEILING(n) AS e,TRUNC(d) AS t,TRUNC(z) AS z,ROUNDMAGIC(CAST(n AS DOUBLE)) AS m FROM rounding_source"
+])
+queries.concat(["TABLE rounding_saved ORDER BY n", "TABLE rounding_results", "SELECT ROUND(n,s) AS r,TRUNC(n,s) AS t FROM rounding_source"])
+changes.concat(["UPDATE rounding_source SET n=-1.255,s=1,d=DATE '2001-03-04',z=TIMESTAMP WITH TIME ZONE '2001-03-04 01:02:03-05'", "INSERT INTO rounding_saved DEFAULT VALUES"])
 
 intervals = [
   ["YEAR", "1"], ["MONTH", "2"], ["DAY", "3"], ["HOUR", "4"], ["MINUTE", "5"], ["SECOND", "6.123456789"],

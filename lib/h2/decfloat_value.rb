@@ -147,6 +147,28 @@ module H2
       self.class.new(unscaled.negative? ? -integer : integer, scale - self.precision + precision, nil)
     end
 
+    def quantize(target_scale, mode)
+      raise Error.new(22018, "Non-finite DECFLOAT cannot be rounded") unless finite?
+      return self if target_scale >= scale || zero?
+
+      places = scale - target_scale
+      if places > precision
+        integer, remainder, half = 0, unscaled.abs, false
+      else
+        divisor = 10**places
+        integer, remainder = unscaled.abs.divmod(divisor)
+        half = remainder * 2 >= divisor
+      end
+      increment = case mode
+      when :floor then unscaled.negative? && !remainder.zero?
+      when :ceiling then unscaled.positive? && !remainder.zero?
+      when :half_up then half
+      when :down then false
+      end
+      integer += 1 if increment
+      self.class.new(unscaled.negative? ? -integer : integer, target_scale, nil)
+    end
+
     def json_text
       raise Error.new(22018, "Non-finite DECFLOAT cannot convert to JSON") if special
 

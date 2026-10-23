@@ -88,4 +88,11 @@ class CLITest < Minitest::Test
     assert_equal 1, H2::CLI.new.run(["--execute", "SELECT 1", "extra.sql"], error: error)
     assert_includes error.string, "provide either"
   end
+
+  def test_rounding_preserves_numeric_scale_and_real_width_in_output
+    output = StringIO.new
+    sql = "SELECT ROUND(n,s) AS r,TRUNC(n,s) AS t,ROUND(CAST(0.285 AS REAL),2) AS f FROM (VALUES (1.255,2)) v(n,s);"
+    assert_equal 0, H2::CLI.new.run(["--execute",sql],output: output)
+    assert_equal "R\tT\tF\n1.260\t1.250\t0.29\n(1 row)\n", output.string
+  end
 end

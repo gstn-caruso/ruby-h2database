@@ -21,6 +21,8 @@ module H2
         name += "(#{type.precision})"
       elsif %w[CHAR VARCHAR BINARY VARBINARY].include?(type.name) && type.precision
         name += "(#{type.precision})"
+      elsif type.name == "NUMERIC" && !type.declared_scale.nil?
+        name += "(#{type.precision || 100_000}, #{type.declared_scale})"
       elsif type.name == "NUMERIC" && type.precision && [type.precision, type.scale] != [100_000, 0]
         name += "(#{type.precision}#{type.scale.to_i.zero? ? '' : ", #{type.scale}"})"
       elsif Temporal::NAMES.include?(type.name) && type.name != "DATE" && type.scale != (Temporal.time_type?(type.name) ? 0 : 6)

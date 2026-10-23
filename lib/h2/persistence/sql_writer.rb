@@ -68,9 +68,8 @@ module H2
         when BigDecimal then type&.name == "NUMERIC" ? ArrayType.decimal_text(value, type.scale) : value.to_s("F")
         when Integer then value.to_s
         when Float
-          raise Error.new(50100, "Non-finite default SQL has not been ported") unless value.finite?
-
-          "CAST(#{value.to_s} AS DOUBLE PRECISION)"
+          text = value.finite? ? value.to_s : "'#{value}'"
+          "CAST(#{text} AS DOUBLE PRECISION)"
         when RowValue then "ROW(#{value.values.map { literal(it) }.join(', ')})"
         when ArrayValue
           text = "ARRAY[#{value.values.map { literal(it, type: value.element_type) }.join(', ')}]"
@@ -87,6 +86,12 @@ module H2
           if node.value.is_a?(DecfloatValue)
             value = node.value
             "CAST(#{value.special ? "'#{value}'" : value.to_s} AS #{type(node.type)})"
+          elsif node.value.is_a?(Float)
+            text = JsonValue.float_text(node.value, real: node.type.name == "REAL")
+            text = "'#{text}'" unless node.value.finite?
+            "CAST(#{text} AS #{type(node.type)})"
+          elsif node.value.is_a?(Integer) && Type::INTEGER_LIMITS.key?(node.type.name)
+            "CAST(#{node.value} AS #{type(node.type)})"
           elsif node.value.is_a?(BigDecimal) && node.type.name == "NUMERIC"
             text = ArrayType.decimal_text(node.value, node.type.scale)
             node.cast ? "CAST(#{text} AS #{type(node.type)})" : text

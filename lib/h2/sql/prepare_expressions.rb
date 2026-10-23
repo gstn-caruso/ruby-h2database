@@ -20,6 +20,11 @@ module H2
         end
         return prepare_case(node) if node.is_a?(CaseExpression)
         node = node.with(**node.to_h.transform_values { prepare(it) })
+        if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name) && statically_typed?(node)
+          @evaluator.validate(node)
+          expression = @evaluator.prepared_math(node).first
+          return prepare(expression) unless expression == node
+        end
         if node.is_a?(Unary) && node.operator == "NOT"
           child = node.operand
           if child.is_a?(QuantifiedArray)
@@ -52,6 +57,9 @@ module H2
         @evaluator.validate(node)
         type = @evaluator.type_of(node)
         value = @evaluator.evaluate(node)
+        if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name)
+          return MathFunctions.literal(value, type)
+        end
         cast = (value.nil? && type.name != "NULL") || (node.is_a?(Cast) && Temporal::NAMES.include?(type.name) && type.name != "DATE" && type.scale != 9)
         if node.is_a?(Cast) && type.is_a?(ArrayType) && value
           cast = type.precision != value.values.length || type.element_type != value.element_type
@@ -161,6 +169,7 @@ module H2
       end
 
       def relevant?(node)
+        return true if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name)
         return true if node.is_a?(Function) && node.name == "SIGN"
         return true if node.is_a?(Literal) && (node.value.is_a?(JsonValue) || node.value.is_a?(DecfloatValue))
         return true if [JsonFormat, JsonPredicate, TypePredicate, JsonConstructor].any? { node.is_a?(it) }

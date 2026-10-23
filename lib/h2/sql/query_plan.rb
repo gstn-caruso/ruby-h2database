@@ -269,6 +269,10 @@ module H2
           elsif node.value.is_a?(BigDecimal) && node.type.name == "NUMERIC"
             text = ArrayType.decimal_text(node.value, node.type.scale)
             node.cast ? "CAST(#{text} AS #{SQLTypeName.format(node.type)})" : text
+          elsif node.value.is_a?(Float) && %w[REAL DOUBLE].include?(node.type.name)
+            text = JsonValue.float_text(node.value, real: node.type.name == "REAL")
+            text = "'#{text}'" unless node.value.finite?
+            node.cast ? "CAST(#{text} AS #{SQLTypeName.format(node.type)})" : text
           else
             expression(node.cast ? Cast.new(Literal.new(node.value), node.type) : Literal.new(node.value), inside: inside)
           end
