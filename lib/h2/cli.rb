@@ -41,7 +41,7 @@ module H2
     def render(result, output)
       if result.query?
         output.puts(result.columns.map { format_value(it) }.join("\t"))
-        result.rows.each { |row| output.puts(row.map { format_value(it) }.join("\t")) }
+        result.rows.each { |row| output.puts(row.each_with_index.map { |value, index| format_value(value, result.types[index]) }.join("\t")) }
         count = result.rows.length
         output.puts("(#{count} #{count == 1 ? 'row' : 'rows'})")
       else
@@ -49,12 +49,12 @@ module H2
       end
     end
 
-    def format_value(value)
+    def format_value(value, type = nil)
       case value
       when nil then "NULL"
       when true then "TRUE"
       when false then "FALSE"
-      when BigDecimal then value.to_s("F")
+      when BigDecimal then type&.scale == 0 && value.frac.zero? ? value.to_i.to_s : value.to_s("F")
       when String
         return "X'#{value.unpack1('H*')}'" if BinaryString.binary?(value)
 

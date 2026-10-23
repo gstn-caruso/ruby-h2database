@@ -3,7 +3,6 @@
 module H2
   module SQL
     module TemporalOperations
-      FIELDS = %w[YEAR MONTH DAY DAY_OF_MONTH DAY_OF_WEEK DAY_OF_YEAR QUARTER HOUR MINUTE SECOND MILLISECOND MICROSECOND NANOSECOND].freeze
       FRACTIONAL = %w[NUMERIC REAL DOUBLE].freeze
       module_function
 
@@ -73,32 +72,6 @@ module H2
         raise Error.new(22007, "Invalid temporal arithmetic result")
       end
 
-      def extract(field, value)
-        raise Error.new(90008, "Unsupported date field #{field}") unless FIELDS.include?(field)
-
-        value = TimestampValue.parse(value.strip) if value.is_a?(String) && !BinaryString.binary?(value)
-        date = case value
-        when DateValue then value
-        when TimestampValue then value.date
-        when TimeValue then DateValue.new(1970, 1, 1)
-        else raise Error.new(22018, "Cannot extract a field from #{value.class}")
-        end
-        nanos = value.is_a?(TimeValue) ? value.nanos : (value.is_a?(TimestampValue) ? value.time.nanos : 0)
-        case field
-        when "YEAR" then date.year
-        when "MONTH" then date.month
-        when "DAY", "DAY_OF_MONTH" then date.day
-        when "DAY_OF_WEEK" then (date.absolute_day + 4) % 7 + 1
-        when "DAY_OF_YEAR" then date.absolute_day - DateValue.new(date.year, 1, 1).absolute_day + 1
-        when "QUARTER" then (date.month + 2) / 3
-        when "HOUR" then nanos / (3600 * Temporal::SECOND)
-        when "MINUTE" then nanos / (60 * Temporal::SECOND) % 60
-        when "SECOND" then nanos / Temporal::SECOND % 60
-        when "MILLISECOND" then nanos % Temporal::SECOND / 1_000_000
-        when "MICROSECOND" then nanos % Temporal::SECOND / 1000
-        when "NANOSECOND" then nanos % Temporal::SECOND
-        end
-      end
     end
   end
 end

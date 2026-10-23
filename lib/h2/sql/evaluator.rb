@@ -8,7 +8,7 @@ module H2
         "UPPER" => 1..1, "UCASE" => 1..1, "LOWER" => 1..1, "LCASE" => 1..1, "LENGTH" => 1..1, "CHAR_LENGTH" => 1..1,
         "OCTET_LENGTH" => 1..1, "BIT_LENGTH" => 1..1,
         "ABS" => 1..1, "COALESCE" => 1..Float::INFINITY, "IFNULL" => 2..2, "NULLIF" => 2..2, "MOD" => 2..2,
-        "EXTRACT" => 2..2, "DATEADD" => 3..3, "DATEDIFF" => 3..3}.merge(TemporalOperations::FIELDS.to_h { [it, 1..1] }).freeze
+        "EXTRACT" => 2..2, "DATE_TRUNC" => 2..2, "LAST_DAY" => 1..1, "DATEADD" => 3..3, "DATEDIFF" => 3..3}.freeze
 
       attr_reader :scope, :outer_bindings
 
@@ -64,7 +64,7 @@ module H2
           if %w[SUM AVG].include?(node.name) && %w[BINARY VARBINARY UUID DATE TIME TIMESTAMP].include?(type_of(node.arguments.first)&.name)
             raise Error.new(90015, "Invalid type for #{node.name}")
           end
-          function_type(node) if DateTimeFunctions::NAMES.include?(node.name)
+          function_type(node) if datetime_function?(node)
         when Default, Star
           raise Error.new(42000, "Invalid expression #{node.class.name.split('::').last}")
         else
@@ -320,10 +320,13 @@ module H2
         node = dateadd_expression(node) if node.is_a?(Binary)
         if node.is_a?(Subquery) && (plan = subquery_plan(node)).constant?
           Literal.new(constant_subquery(node, plan))
-        elsif node.is_a?(Function) && DateTimeFunctions::NAMES.include?(node.name) && constant?(node)
-          value = Literal.new(evaluate(node))
-          value.value.nil? && function_type(node).name != "NULL" ? Cast.new(value, function_type(node)) : value
-        elsif node.is_a?(Function) && DateTimeFunctions::NAMES.include?(node.name)
+        elsif datetime_function?(node) && constant?(node)
+          type = function_type(node)
+          value = evaluate(node)
+          value = value.to_i if value.is_a?(BigDecimal) && type.scale == 0 && value.frac.zero?
+          literal = Literal.new(value)
+          value.nil? && type.name != "NULL" ? Cast.new(literal, type) : literal
+        elsif datetime_function?(node)
           node.with(arguments: node.arguments.map { optimized_expression(it) })
         else
           node
@@ -331,6 +334,10 @@ module H2
       end
 
       private
+
+      def datetime_function?(node)
+        node.is_a?(Function) && (DateTimeFunctions::NAMES.include?(node.name) || CalendarFunctions::NAMES.include?(node.name))
+      end
 
       def dateadd_expression(node)
         return node unless %w[+ -].include?(node.operator)
@@ -476,6 +483,11 @@ module H2
       end
 
       def function_type(node)
+        if CalendarFunctions::NAMES.include?(node.name)
+          field = node.name == "LAST_DAY" ? nil : node.arguments.first.value
+          type = CalendarFunctions.type(node.name, field, type_of(node.arguments.last))
+          return constant?(node) ? CalendarFunctions.constant_type(node.name, field, evaluate(node), type) : type
+        end
         if DateTimeFunctions::NAMES.include?(node.name)
           type = DateTimeFunctions.type(node.name, node.arguments.first.value, type_of(node.arguments.last))
           if constant?(node)
@@ -484,8 +496,6 @@ module H2
           end
           return type
         end
-        return Type.new("INTEGER", nil, 0) if node.name == "EXTRACT" || TemporalOperations::FIELDS.include?(node.name)
-
         argument_type = type_of(node.arguments.first)
         case node.name
         when "COUNT", "LENGTH", "CHAR_LENGTH", "OCTET_LENGTH", "BIT_LENGTH" then Type.new("BIGINT", nil, 0)
@@ -668,8 +678,7 @@ module H2
         end
         return nil if values.any?(&:nil?)
         return DateTimeFunctions.evaluate(node.name, *values) if DateTimeFunctions::NAMES.include?(node.name)
-        return TemporalOperations.extract(first, second) if node.name == "EXTRACT"
-        return TemporalOperations.extract(node.name, first) if TemporalOperations::FIELDS.include?(node.name)
+        return CalendarFunctions.evaluate(node.name, *values) if CalendarFunctions::NAMES.include?(node.name)
 
         case node.name
         when "UPPER", "UCASE" then BinaryString.text(first).upcase.freeze

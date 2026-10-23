@@ -651,27 +651,24 @@ module H2
           else
             column_or_function(token)
           end
-        when "DATEADD", "TIMESTAMPADD", "DATEDIFF", "TIMESTAMPDIFF"
+        when "DATEADD", "TIMESTAMPADD", "DATEDIFF", "TIMESTAMPDIFF", "DATE_TRUNC"
           if accept("(")
-            token_field = take
-            unless token_field.kind == :word || (token_field.kind == :literal && token_field.value.is_a?(String) && !BinaryString.binary?(token_field.value))
-              raise Error.new(42001, "Expected a date-time field")
-            end
-            raise Error.new(42001, "Expected a date-time field") if token_field.kind == :word && token_field.value == "NULL"
-            field = DateTimeFunctions.field(token_field.value)
+            field = datetime_field
             expect(",")
             first = expression
-            expect(",")
-            second = expression
+            arguments = [Literal.new(field), first]
+            if token.value != "DATE_TRUNC"
+              expect(",")
+              arguments << expression
+            end
             expect(")")
-            Function.new(DateTimeFunctions::ALIASES.fetch(token.value, token.value), [Literal.new(field), first, second], false)
+            Function.new(DateTimeFunctions::ALIASES.fetch(token.value, token.value), arguments, false)
           else
             column_or_function(token)
           end
         when "EXTRACT"
           expect("(")
-          field = take.value
-          raise Error.new(90008, "Unknown datetime field #{field}") unless TemporalOperations::FIELDS.include?(field)
+          field = datetime_field
           expect("FROM")
           argument = expression
           expect(")")
@@ -739,13 +736,27 @@ module H2
         end
       end
 
+      def datetime_field
+        token = take
+        unless token.kind == :word || (token.kind == :literal && token.value.is_a?(String) && !BinaryString.binary?(token.value))
+          raise Error.new(42001, "Expected a date-time field")
+        end
+        raise Error.new(42001, "Expected a date-time field") if token.kind == :word && token.value == "NULL"
+
+        DateTimeFunctions.field(token.value)
+      end
+
       def column_or_function(token)
         name = token.value
         if accept("(")
           distinct = accept("DISTINCT")
           arguments = keyword?(")") ? [] : list { expression }
           expect(")")
-          Function.new(name, arguments, distinct)
+          if (field = CalendarFunctions::FIELD_FUNCTIONS[name])
+            Function.new("EXTRACT", [Literal.new(field), *arguments], distinct)
+          else
+            Function.new(name, arguments, distinct)
+          end
         elsif accept(".")
           accept("*") ? Star.new(name) : ColumnRef.new(identifier, name)
         else
