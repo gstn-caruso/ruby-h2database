@@ -382,7 +382,7 @@ H2::MVStore::Store.open("values.mv") do |store|
 end
 ```
 
-`Value#type` preserves SQL type identity, `#data` exposes its immutable storage representation, and `#to_ruby` converts initial scalars and nested collections. `Decimal` retains both the unscaled integer and scale. The low-level temporal storage values expose H2's packed date/nanosecond/offset fields; the SQL API converts supported DATE/TIME/TIMESTAMP fields into the native objects described above. LOB values retain their database identifiers and lengths; the stream API below can resolve external content explicitly through the corresponding LOB metadata. Storage codecs cover more types than the SQL parser and expression evaluator currently support.
+`Value#type` preserves SQL type identity, `#data` exposes its immutable storage representation, and `#to_ruby` converts initial scalars and nested collections. `Decimal` retains both the unscaled integer and scale. The low-level temporal storage values expose H2's packed date/nanosecond/offset fields; the SQL API converts supported DATE/TIME/TIMESTAMP fields into the native objects described above. LOB values retain their database identifiers and lengths; `LobStorage` below opens their external content. Storage codecs cover more types than the SQL parser and expression evaluator currently support.
 
 Existing `table.<object_id>` and `index.<object_id>` maps can be opened with inferred registered codecs. Table entries contain `VersionedValue` objects with `current`, `committed`, `operation_id` and `entry_id`; current row fields are in `SearchRow#values`. This is low-level access: callers editing these maps must maintain table/index consistency. The SQL API maintains the supported table/index/catalog relationships itself.
 
@@ -416,7 +416,37 @@ Readers fetch blocks as needed and support `read`, `readpartial`, `getbyte`, `sk
 
 `length(id)` and `in_place?(id)` inspect the identifier without reading map blocks. `max_block_key(id)` follows indirect identifiers; `remove(id)` deletes all its stored blocks. The caller manages sharing and references before removing a stream. `next_key` is adjustable, and allocation searches around existing keys; an exhausted upper key range raises RangeError without overwriting an existing block. Writes through a single StreamStore are serialized, and input failures reclaim blocks allocated by that write. Missing reader blocks raise IOError with an MVStore error 50 as the cause; malformed identifiers and cycles raise MVStore error 6.
 
-The `:blob_meta`, `:blob_reference` and `:null` codecs resolve H2's LOB maps. Immutable `BlobMetadata` exposes `stream_id`, `table_id`, `byte_count` and `content_hash`; the raw count follows the reference metadata and can represent CLOB characters. `BlobReference` exposes `stream_id` and `lob_id`. These differ from `LobReference`, which is the pointer stored in a SQL row. Native stream reads can recover external BLOB/CLOB payloads from JDBC-created files. SQL BLOB/CLOB declarations, conversions, JDBC-style LOB objects and the complete temporary/shared-reference lifecycle remain pending. Five verified Java StreamStore defects and their native handling are recorded in [MIGRATION.md](MIGRATION.md).
+The `:blob_meta`, `:blob_reference` and `:null` codecs resolve H2's LOB maps. Immutable `BlobMetadata` exposes `stream_id`, `table_id`, `byte_count` and `content_hash`; the raw count follows the reference metadata and can represent CLOB characters. `BlobReference` exposes `stream_id` and `lob_id`. These differ from `LobReference`, which is the pointer stored in a SQL row. Native stream reads can recover external BLOB/CLOB payloads from JDBC-created files. Verified Java StreamStore defects and their native handling are recorded in [MIGRATION.md](MIGRATION.md).
+
+## LOB storage and shared references
+
+`H2::MVStore::LobStorage` manages H2's `lobMap`, `tempLobMap`, `lobRef` and `lobData` maps, including temporary values, permanent copies and final-reference reclamation. It returns immutable storage `Value` objects. Keep permanent pointers with the records that own them:
+
+```ruby
+require "h2/mvstore"
+require "stringio"
+
+H2::MVStore::Store.open("lobs.mv") do |store|
+  saved = store.open_registered_map("saved", key_type: :long, value_type: :value)
+  H2::MVStore::LobStorage.open(store) do |lobs|
+    temporary = lobs.create_blob(StringIO.new("payload".b * 1000))
+    saved[1] = lobs.copy_lob(temporary, table_id: 7)
+  end
+end
+
+H2::MVStore::Store.open("lobs.mv") do |store|
+  H2::MVStore::LobStorage.open(store) do |lobs|
+    value = store.open_map("saved")[1]
+    lobs.open(value) { |reader| p reader.read(7) } # => "payload"
+  end
+end
+```
+
+`create_blob(input, max_length: -1)` accepts an IO-like byte source; `create_clob(input, max_length: -1)` accepts a string or encoded IO. The default means unknown length. A nonnegative limit caps bytes for BLOBs and UTF-16 code units for CLOBs. CLOBs are stored as UTF-8, replacing isolated or truncated surrogates with `?`. UTF-8 and UTF-16BE/LE inputs can arrive in short byte reads; input objects remain open. With the default `max_in_place: 256`, a known BLOB limit up to 256 or a known CLOB limit whose triple fits within 256 produces an inline value. Other paths produce a temporary reference, even if the actual content is small. `copy_lob(value, table_id:)` shares external stream blocks and assigns a new LOB id; inline copies return the same value. Table ids -1, -2 and -3 share the temporary namespace.
+
+`open(value)` handles inline and external data and accepts an ensure-close block. `get_input_stream(lob_id, table_id: nil)` opens an external id, searching temporary then permanent metadata when no table id is supplied. Missing ids raise MVStore error 50. External readers expose the stream methods above and pin their storage version until closed. `remove_lob(value)` queues removal; `cleanup(oldest_version: store.version)` removes entries strictly older than that version, respecting reader pins. `remove_all_for_table(table_id)` removes that table's references, waiting for active readers; any temporary table id selects all temporary references. Blocks remain until their final reference is removed.
+
+Use one active LOB manager per raw store; a second raises MVStore error 103. Close it before closing the raw store. Its block form closes readers, removes temporary references and finishes queued removals, while leaving the raw store open. Permanent references survive reopen, and existing LOB maps support read-only access. LOB operations serialize through the manager and store monitors. SQL BLOB/CLOB declarations, conversions, JDBC-style LOB objects, transaction rollback coordination, crash recovery of cleanup and resource limits remain pending. The removal queue is in memory and is not automatically enlisted in `TransactionStore` transactions.
 
 ## MVStore transactions
 

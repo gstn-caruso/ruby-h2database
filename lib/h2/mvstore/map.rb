@@ -30,6 +30,14 @@ module H2
         end
       end
 
+      def ceiling_key(key)
+        @store.synchronize do
+          check_open
+          key = key_type.copy(key)
+          @records[key_position(key)]&.first
+        end
+      end
+
       def []=(key, value)
         key, value = key_type.copy(key), value_type.copy(value)
         @store.synchronize do
