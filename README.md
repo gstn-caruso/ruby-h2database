@@ -54,6 +54,30 @@ end
 
 Set queries work in derived/scalar/correlated subqueries, membership predicates, CTAS, insert-select, DML expressions and persisted defaults. Constant scalar queries are evaluated during preparation, including their labels, null types and cardinality checks. Both branches currently materialize before the set operation and pagination; lazy unions, external results, complete plan formatting and optimizer behavior remain to port.
 
+## Common table expressions
+
+`WITH` defines query-local tables in declaration order. Later definitions can read earlier ones, and nested `WITH` scopes can replace outer CTE names. Explicit column names replace corresponding output names; omitted names come from the defining query. Real catalog tables take priority when names collide, and `PUBLIC.name` always resolves against the catalog.
+
+```ruby
+H2.connect do |connection|
+  result = connection.execute(<<~SQL)
+    WITH RECURSIVE numbers(n) AS (
+      VALUES 1
+      UNION ALL
+      SELECT n + 1 FROM numbers WHERE n < 4
+    )
+    SELECT SUM(n) AS total FROM numbers
+  SQL
+  p result.rows # => [[10]]
+end
+```
+
+As in this H2 snapshot, `WITH RECURSIVE` requires column lists. Recursion evaluates the seed, then repeatedly evaluates the recursive branch against the previous batch until it returns no rows. It retains duplicates for every root set operator, including `UNION`; outer set ordering/limits inside that recursive definition are ignored by H2's recursive index. Put final ordering and pagination on the main query. Recursive result rows retain their original value representations.
+
+CTEs work in derived/scalar/correlated query bodies, EXISTS/IN, CTAS, insert-select, DML subqueries and persisted defaults. Definitions cannot refer to outer row columns. Parameters are reusable; use explicit casts such as `SELECT CAST(? AS INT)` in recursive seeds when integer metadata is required. Untyped parameters follow H2's initial VARCHAR inference or unknown-column-type errors. CTE tables do not become catalog objects and are unavailable after the statement.
+
+Results currently materialize in memory, and repeated references recompute them. General recursive-anchor references, data-change delta tables, complete optimizer/EXPLAIN output, cancellation and resource limits remain pending. The supported cases and reference evidence are recorded in [MIGRATION.md](MIGRATION.md).
+
 ## Binary and UUID values
 
 `BINARY(n)` pads with zero bytes; `VARBINARY(n)` / `BINARY VARYING(n)` preserves length. Assignment rejects oversized values, while explicit casts truncate. SQL hexadecimal literals use `X'00ff'`; binary parameters and results use frozen copies of Ruby strings with `Encoding::BINARY` (`ASCII-8BIT`). Use `.b` when binding bytes. Text-to-binary conversion uses UTF-8. Binary-to-text conversion follows Java's UTF-8 replacement behavior for malformed input.
@@ -167,7 +191,7 @@ File-backed SQL commits use this storage API internally, while direct map transa
 
 ## SQL and command line
 
-The implemented subset includes table creation and deletion, `CREATE TABLE ... AS`, basic typed columns, defaults, primary and unique keys, `NOT NULL`, parameterized inserts, `INSERT ... SELECT`, updates, deletes, joins, derived tables, set queries, projections, filters, expressions, `VALUES`, ordering, pagination, grouping, distinct results and initial scalar and aggregate functions. `SYSTEM_RANGE`/`GENERATE_SERIES` supports ascending and descending ranges; simple counts and limited scans avoid materializing huge ranges. The supported subset is detailed in [MIGRATION.md](MIGRATION.md).
+The implemented subset includes table creation and deletion, `CREATE TABLE ... AS`, basic typed columns, defaults, primary and unique keys, `NOT NULL`, parameterized inserts, `INSERT ... SELECT`, updates, deletes, joins, derived tables, set queries, common table expressions, projections, filters, expressions, `VALUES`, ordering, pagination, grouping, distinct results and initial scalar and aggregate functions. `SYSTEM_RANGE`/`GENERATE_SERIES` supports ascending and descending ranges; simple counts and limited scans avoid materializing huge ranges. The supported subset is detailed in [MIGRATION.md](MIGRATION.md).
 
 ```sh
 bundle exec h2 --execute "SELECT 1 + 2 AS answer;"
@@ -187,7 +211,7 @@ mvn -q -f h2/pom.xml -DskipTests package
 bundle exec rake test:reference
 ```
 
-This checks the relational, subquery, binary/UUID and set-query SQL fixtures against both engines, including result labels, type names, rows, update counts, errors and SQL states. Generated set cases additionally check type families, duplicate/null semantics, precedence and JDBC prepared ordering. Top-level binary result columns are compared byte-for-byte through JDBC `getBytes`, and a generated UTF-8 comparison covers every byte pair plus multibyte boundaries. It also cross-reads and cross-writes MVStore files with all three compression modes, checks B-tree lookups, preserves unopened maps, verifies file locks in both directions, and recovers commits after process death. Storage tests exercise real SQL rows/indexes and prepared transactions. The persistent SQL suite creates databases with each engine, exchanges SQL changes, reopens through both engines, verifies defaults/keys/row ids/credentials/DDL, and kills writers before commit, after commit and after the durable decision. The reference task reports the Java commit-marker recovery and zero-precision metadata limitations explicitly. Java is used only by this optional reference check; the Ruby runtime and native test suite do not require it. CI runs the reference comparison separately on Ruby 3.4 and 4.0.
+This checks the relational, subquery, binary/UUID, set-query and CTE SQL fixtures against both engines, including result labels, type names, rows, update counts, errors and SQL states. Generated set/CTE cases additionally check type families, duplicate/null semantics, precedence, recursive batches and JDBC prepared parameters. Top-level binary result columns are compared byte-for-byte through JDBC `getBytes`, and a generated UTF-8 comparison covers every byte pair plus multibyte boundaries. It also cross-reads and cross-writes MVStore files with all three compression modes, checks B-tree lookups, preserves unopened maps, verifies file locks in both directions, and recovers commits after process death. Storage tests exercise real SQL rows/indexes and prepared transactions. The persistent SQL suite creates databases with each engine, exchanges SQL changes, reopens through both engines, verifies defaults/keys/row ids/credentials/DDL, and kills writers before commit, after commit and after the durable decision. The reference task reports the Java commit-marker recovery and zero-precision metadata limitations explicitly. Java is used only by this optional reference check; the Ruby runtime and native test suite do not require it. CI runs the reference comparison separately on Ruby 3.4 and 4.0.
 
 ## Upstream and license
 

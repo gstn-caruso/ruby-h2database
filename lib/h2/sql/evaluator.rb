@@ -7,7 +7,7 @@ module H2
       FUNCTIONS = {"COUNT" => 1..1, "SUM" => 1..1, "AVG" => 1..1, "MIN" => 1..1, "MAX" => 1..1,
         "UPPER" => 1..1, "UCASE" => 1..1, "LOWER" => 1..1, "LCASE" => 1..1, "LENGTH" => 1..1, "CHAR_LENGTH" => 1..1,
         "OCTET_LENGTH" => 1..1, "BIT_LENGTH" => 1..1,
-        "ABS" => 1..1, "COALESCE" => 1..Float::INFINITY, "NULLIF" => 2..2, "MOD" => 2..2}.freeze
+        "ABS" => 1..1, "COALESCE" => 1..Float::INFINITY, "IFNULL" => 2..2, "NULLIF" => 2..2, "MOD" => 2..2}.freeze
 
       attr_reader :scope, :outer_bindings
 
@@ -134,7 +134,9 @@ module H2
       def evaluate(node, row = {}, group = nil)
         case node
         when Literal then node.value
-        when Parameter then @parameters.fetch(node.index)
+        when Parameter
+          value = @parameters.fetch(node.index)
+          value.equal?(UNBOUND_PARAMETER) ? nil : value
         when ColumnRef then row.fetch(scope.resolve(node).key)
         when BoundColumn then row.fetch(node.binding.key)
         when Unary
@@ -245,7 +247,9 @@ module H2
           plan.constant? && constant_subquery(node, plan).nil? ? Type.new("NULL", nil, nil) : query_type(plan)
         when Exists, InQuery then Type.new("BOOLEAN", nil, nil)
         when CaseExpression then prepared_case(node).last
-        when Parameter then type_of(Literal.new(@parameters.fetch(node.index)))
+        when Parameter
+          value = @parameters.fetch(node.index)
+          value.equal?(UNBOUND_PARAMETER) ? Type.new("UNKNOWN", nil, nil) : type_of(Literal.new(value))
         when Literal
           case node.value
           when Integer
@@ -444,7 +448,7 @@ module H2
         when "COUNT", "LENGTH", "CHAR_LENGTH", "OCTET_LENGTH", "BIT_LENGTH" then Type.new("BIGINT", nil, 0)
         when "UPPER", "UCASE", "LOWER", "LCASE" then Type.new("VARCHAR", nil, nil)
         when "ABS", "MIN", "MAX", "NULLIF" then argument_type
-        when "COALESCE" then Type.common(node.arguments.map { type_of(it) })
+        when "COALESCE", "IFNULL" then Type.common(node.arguments.map { type_of(it) })
         when "MOD" then type_of(node.arguments.last)
         when "SUM"
           return nil unless argument_type
@@ -599,7 +603,7 @@ module H2
       def function(node, row, group)
         return aggregate(node, group) if AGGREGATES.include?(node.name)
 
-        if node.name == "COALESCE"
+        if %w[COALESCE IFNULL].include?(node.name)
           node.arguments.each do |argument|
             value = evaluate(argument, row, group)
             return function_type(node).convert(value, cast: true, source_type: type_of(argument)) unless value.nil?

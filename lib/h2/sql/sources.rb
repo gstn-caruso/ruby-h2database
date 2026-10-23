@@ -46,7 +46,12 @@ module H2
         case source
         when nil then Relation.new([], [], [], [], ->(_row) { [{}] })
         when TableSource
-          table = @catalog.fetch(source.name) { raise Error.new(42102, "Table #{source.name} not found") }
+          if !@catalog.key?(source.name) && !source.qualified && (cte = @queries.cte(source.name))
+            bindings = cte.columns.map { binding(it.name, source.name, it.type) }
+            loader = ->(_row) { cte.rows.lazy.map { |row| bindings.each_with_index.to_h { |column, index| [column.key, row[index]] } } }
+            return Relation.new(bindings, bindings, [source.name], [], loader)
+          end
+          table = @catalog.fetch(source.name) { raise Error.new(@catalog.empty? ? 42104 : 42102, "Table #{source.name} not found") }
           bindings = table.columns.map { binding(it.name, source.name, it.type) }
           loader = lambda do |_outer_row|
             table.rows.lazy.map { |row| bindings.to_h { [it.key, row.fetch(it.name)] } }

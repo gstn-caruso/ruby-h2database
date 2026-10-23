@@ -51,6 +51,9 @@ class TypeTest < DatabaseTest
   end
 
   def test_h2_error_states_are_exposed
+    error = assert_sql_error(42104, "TABLE missing")
+    assert_equal "42S04", error.sql_state
+    execute("CREATE TABLE present(v INT)")
     error = assert_sql_error(42102, "TABLE missing")
     assert_equal "42S02", error.sql_state
     error = assert_sql_error(7001, "SELECT ?")

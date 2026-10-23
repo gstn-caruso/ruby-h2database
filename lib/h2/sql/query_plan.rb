@@ -24,6 +24,10 @@ module H2
         @order.empty? && [@statement.limit, @statement.offset].all? { it.nil? || @bounds.constant_expression?(it) }
       end
 
+      def recursive_parts
+        nil
+      end
+
       private
 
       def matches?(evaluator, expression, row, group = nil)
@@ -215,7 +219,10 @@ module H2
         end
         @evaluator = Evaluator.new(parameters, scope: Scope.new([], parent: outer_scope), queries: queries)
         statement.rows.flatten.each { @evaluator.validate(it) }
-        @types = Array.new(width) { |index| Type.common(statement.rows.map { @evaluator.type_of(it[index]) }) }.freeze
+        @types = Array.new(width) do |index|
+          type = Type.common(statement.rows.map { @evaluator.type_of(it[index]) })
+          type.name == "UNKNOWN" ? Type.new("VARCHAR", nil, nil) : type
+        end.freeze
         @columns = Array.new(width) { "C#{it + 1}" }.freeze
         @bindings = columns.each_with_index.map { |name, index| ColumnBinding.new(name, nil, types[index], Object.new.freeze) }
         scope = Scope.new(@bindings, parent: outer_scope)
@@ -284,6 +291,13 @@ module H2
 
       def query(node)
         case node
+        when WithQuery
+          definitions = node.definitions.map do |definition|
+            name = definition.name
+            name += "(#{definition.columns.join(', ')})" if definition.columns
+            "#{name} AS (#{query(definition.query)})"
+          end
+          "WITH#{node.recursive ? ' RECURSIVE' : ''} #{definitions.join(', ')}\n#{query(node.query)}"
         when SetQuery
           operator = {union: "UNION", union_all: "UNION ALL", except: "EXCEPT", intersect: "INTERSECT"}.fetch(node.operator)
           operands = [node.left, node.right].map do |operand|

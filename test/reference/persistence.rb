@@ -94,13 +94,18 @@ schema = [
   "CREATE TABLE binary_rows AS SELECT ROW(UUID '01234567-89ab-cdef-0123-456789abcdef',X'ff00') AS pair",
   "CREATE TABLE set_rows AS SELECT id FROM people UNION SELECT a FROM bag INTERSECT VALUES 1,2",
   "CREATE TABLE set_default(v INT DEFAULT (SELECT v FROM source UNION ALL SELECT 5 ORDER BY (1) LIMIT 1))",
-  "INSERT INTO set_default DEFAULT VALUES"
+  "INSERT INTO set_default DEFAULT VALUES",
+  "CREATE TABLE cte_rows AS WITH RECURSIVE r(n) AS (VALUES 1 UNION ALL SELECT n+1 FROM r WHERE n<3) TABLE r",
+  "CREATE TABLE cte_default(v INT DEFAULT (WITH RECURSIVE r(n) AS (VALUES 1 UNION ALL SELECT n+1 FROM r WHERE n<(SELECT MAX(v) FROM source)) SELECT MAX(n) FROM r))",
+  "INSERT INTO cte_default DEFAULT VALUES"
 ]
 queries = ["TABLE people ORDER BY id", "TABLE pairs ORDER BY a,b", "TABLE bag ORDER BY a NULLS LAST,b NULLS LAST",
   "TABLE typed", "TABLE target", "TABLE rows_table", 'TABLE "odd""table"', "SELECT id FROM people WHERE name='Ada 😀'",
   "TABLE bytes ORDER BY u", "TABLE binary_defaults", "SELECT u FROM bytes WHERE v=X'00ffeda080'",
   "TABLE empty_binary", "TABLE binary_rows", "TABLE set_rows ORDER BY id", "TABLE set_default ORDER BY v",
-  "SELECT id FROM set_rows INTERSECT SELECT id FROM people ORDER BY id"]
+  "SELECT id FROM set_rows INTERSECT SELECT id FROM people ORDER BY id",
+  "TABLE cte_rows ORDER BY n", "TABLE cte_default ORDER BY v",
+  "WITH q(n) AS (TABLE cte_rows) SELECT n FROM q WHERE n IN(WITH r(n) AS (VALUES 1,3) TABLE r) ORDER BY n"]
 changes = ["UPDATE people SET amount=amount+1 WHERE id=-7", "INSERT INTO people(id,name) VALUES(20,'new')",
   "DELETE FROM bag WHERE a IS NULL", "UPDATE bag SET b='updated' WHERE a=1", "INSERT INTO bag VALUES(2,'later')",
   "UPDATE source SET v=20", "INSERT INTO target DEFAULT VALUES", "INSERT INTO pairs VALUES('b',3,'z')",
@@ -110,7 +115,8 @@ changes = ["UPDATE people SET amount=amount+1 WHERE id=-7", "INSERT INTO people(
   "INSERT INTO bytes(u,v) VALUES('11111111-1111-1111-1111-111111111111',X'00')",
   "INSERT INTO bytes(u,v) VALUES('22222222-2222-2222-2222-222222222222',X'80ff00')",
   "INSERT INTO binary_defaults DEFAULT VALUES", "INSERT INTO set_default DEFAULT VALUES",
-  "INSERT INTO set_rows SELECT id FROM people EXCEPT VALUES 0"]
+  "INSERT INTO set_rows SELECT id FROM people EXCEPT VALUES 0", "INSERT INTO cte_default DEFAULT VALUES",
+  "INSERT INTO cte_rows WITH q(n) AS (VALUES 4) TABLE q"]
 
 Dir.mktmpdir("sql-persistence-reference-") do |directory|
   [:none, :fast, :high].each do |compression|

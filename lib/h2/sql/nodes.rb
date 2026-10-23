@@ -2,6 +2,7 @@
 
 module H2
   module SQL
+    UNBOUND_PARAMETER = Object.new.freeze
     Literal = Data.define(:value)
     Parameter = Data.define(:index)
     ColumnRef = Data.define(:name, :qualifier)
@@ -21,7 +22,7 @@ module H2
     CaseExpression = Data.define(:operand, :branches, :fallback)
     Projection = Data.define(:expression, :label)
     Ordering = Data.define(:expression, :descending, :nulls, :position)
-    TableSource = Data.define(:name)
+    TableSource = Data.define(:name, :qualified)
     RangeSource = Data.define(:name, :arguments)
     DerivedSource = Data.define(:query)
     AliasedSource = Data.define(:source, :name, :columns)
@@ -29,6 +30,8 @@ module H2
     Select = Data.define(:projections, :source, :where, :group, :having, :distinct, :order, :limit, :offset)
     Values = Data.define(:rows, :order, :limit, :offset)
     SetQuery = Data.define(:left, :right, :operator, :order, :limit, :offset)
+    CommonTableDefinition = Data.define(:name, :columns, :query)
+    WithQuery = Data.define(:definitions, :query, :recursive)
     Explain = Data.define(:statement)
     CreateTable = Data.define(:name, :columns, :keys, :if_not_exists, :query, :with_data)
     DropTable = Data.define(:names, :if_exists)
