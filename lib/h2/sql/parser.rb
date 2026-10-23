@@ -286,16 +286,19 @@ module H2
         end
         precision = name == "NUMERIC" ? 100_000 : (%w[CHAR BINARY].include?(name) ? 1 : nil)
         scale = name == "NUMERIC" ? 0 : nil
+        declared_scale = nil
         if accept("(")
           precision = positive_integer
-          scale = accept(",") ? positive_integer(allow_zero: true) : 0 if name == "NUMERIC"
+          if name == "NUMERIC" && accept(",")
+            scale = declared_scale = positive_integer(allow_zero: true)
+          end
           expect(")")
           raise Error.new(50100, "Precision for #{name} not supported") unless %w[NUMERIC VARCHAR CHAR BINARY VARBINARY].include?(name)
           if %w[BINARY VARBINARY].include?(name) && precision > 1_000_000_000
             raise Error.new(90150, "Invalid binary precision")
           end
         end
-        Type.new(name, precision, scale)
+        Type.new(name, precision, scale, declared_scale)
       end
 
       def positive_integer(allow_zero: false)
@@ -1002,6 +1005,7 @@ module H2
       def column_or_function(token)
         name = token.value
         if accept("(")
+          name = MathFunctions::ALIASES.fetch(name, name)
           return json_constructor(name) if %w[JSON_ARRAY JSON_OBJECT].include?(name)
           return aggregate(name) if Aggregate::NAMES.include?(name)
 
@@ -1009,6 +1013,9 @@ module H2
           distinct = accept("DISTINCT")
           arguments = keyword?(")") ? [] : list { expression }
           expect(")")
+          if MathFunctions::ARITIES.key?(name) && (distinct || !MathFunctions::ARITIES.fetch(name).cover?(arguments.length))
+            raise Error.new(42001, "Invalid #{name} arguments")
+          end
           if %w[ARRAY_GET ARRAY_APPEND ARRAY_CAT].include?(name)
             raise Error.new(7001, "#{name} requires two arguments") unless arguments.length == 2
 

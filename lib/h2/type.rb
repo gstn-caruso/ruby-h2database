@@ -1,7 +1,11 @@
 # frozen_string_literal: true
 
 module H2
-  class Type < Data.define(:name, :precision, :scale)
+  class Type < Data.define(:name, :precision, :scale, :declared_scale)
+    def initialize(name:, precision:, scale:, declared_scale: nil)
+      super
+    end
+
     ORDER = (%w[NULL CHAR VARCHAR BINARY VARBINARY BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE DECFLOAT] + Temporal::NAMES + Intervals::NAMES + %w[JSON UUID]).freeze
     INTEGER_LIMITS = {"TINYINT" => (-128..127), "SMALLINT" => (-32_768..32_767),
       "INTEGER" => (-2_147_483_648..2_147_483_647),
@@ -246,6 +250,11 @@ module H2
       number = case value
       when IntervalValue then value.to_i
       when Integer then value
+      when Float
+        if value > INTEGER_LIMITS.fetch("BIGINT").end.to_f || value < INTEGER_LIMITS.fetch("BIGINT").begin.to_f
+          raise Error.new(22003, "Floating point value is outside BIGINT range")
+        end
+        value.nan? ? 0 : [[(value.to_r + Rational(1,2)).floor, INTEGER_LIMITS.fetch("BIGINT").begin].max, INTEGER_LIMITS.fetch("BIGINT").end].min
       when Numeric then value.round(0, half: :up).to_i
       when true then 1
       when false then 0
