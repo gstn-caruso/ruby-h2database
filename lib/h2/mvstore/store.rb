@@ -146,6 +146,19 @@ module H2
         end
       end
 
+      def claim_lobs(owner)
+        synchronize do
+          check_open
+          raise Error.new(103, "MVStore already has a LOB manager") if @lob_owner && !@lob_owner.closed?
+
+          @lob_owner = owner
+        end
+      end
+
+      def release_lobs(owner)
+        synchronize { @lob_owner = nil if @lob_owner.equal?(owner) }
+      end
+
       def release_transactions(owner)
         synchronize { @transaction_owner = nil if @transaction_owner.equal?(owner) }
       end
