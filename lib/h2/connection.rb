@@ -229,7 +229,7 @@ module H2
       value = Temporal.from_ruby(value)
       case value
       when String then value.dup.freeze
-      when RowValue then RowValue.new(value.values.map { copy_parameter(it, parents) })
+      when RowValue then RowValue.new(values: value.values.map { copy_parameter(it, parents) }, type: value.type)
       when ArrayValue
         values = value.values.map { copy_parameter(it, parents) }
         ArrayType.new(value.element_type, values.length).convert(ArrayValue.new(values, value.element_type), cast: true, context: @context)

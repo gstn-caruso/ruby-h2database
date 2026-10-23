@@ -81,14 +81,11 @@ module H2
         IndexDefinition.new(name, table, columns.freeze, sorts.freeze, unique, primary)
       end
 
-      def base_type
-        if accept("ROW")
-          expect("(")
-          fields = list { identifier; parse_type }
-          expect(")")
-          return RowType.new(fields)
-        elsif accept("NULL")
-          return Type.new("NULL", nil, nil)
+      def row_type
+        if keyword?("(") && @tokens[@position + 1]&.value == ")"
+          take
+          take
+          return RowType.new([])
         end
         super
       end

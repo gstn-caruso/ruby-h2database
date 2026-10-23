@@ -91,7 +91,7 @@ module H2
           raise Error.new(42000, "Invalid expression #{node.class.name.split('::').last}")
         else
           children(node).each { validate(it, aggregates: aggregates, inside_aggregate: inside_aggregate) }
-          if node.is_a?(IntervalDifference) || node.is_a?(TimeZoneExpression) || node.is_a?(ArrayElement) || node.is_a?(ArrayConstructor)
+          if node.is_a?(IntervalDifference) || node.is_a?(TimeZoneExpression) || node.is_a?(ArrayElement) || node.is_a?(ArrayConstructor) || node.is_a?(RowConstructor) || node.is_a?(FieldReference)
             type_of(node)
           elsif node.is_a?(Binary) && %w[= <> != < > <= >=].include?(node.operator)
             Type.check_comparable(type_of(node.left), type_of(node.right))
@@ -265,7 +265,13 @@ module H2
         when JsonConstructor then json_constructor(node, row, group)
         when Aggregate then aggregate(node, group)
         when Function then function(node, row, group)
-        when RowConstructor then RowValue.new(node.expressions.map { evaluate(it, row, group) })
+        when RowConstructor then RowValue.new(values: node.expressions.map { evaluate(it, row, group) }, type: type_of(node))
+        when FieldReference
+          value = evaluate(node.expression, row, group)
+          return nil if value.nil?
+          return value.field(node.name) if value.is_a?(JsonValue)
+
+          value.values[type_of(node.expression).field_index(node.name)]
         when ArrayConstructor
           type_of(node).convert(ArrayValue.new(node.expressions.map { evaluate(it, row, group) }, type_of(node).element_type), cast: true, context: context)
         when ArrayElement
@@ -431,6 +437,12 @@ module H2
           end
           IntervalOperations.type("-", type_of(node.left), type_of(node.right))
         when RowConstructor then RowType.new(node.expressions.map { type_of(it) })
+        when FieldReference
+          type = type_of(node.expression)
+          return Type.new("JSON", JsonValue::MAX_PRECISION, 0) if type.name == "JSON"
+          return type.fields[type.field_index(node.name)] if type.is_a?(RowType)
+
+          raise Error.new(type.name == "UNKNOWN" ? 50004 : 90008, "Field access requires ROW or JSON")
         when ArrayConstructor
           types = node.expressions.map { type_of(it) }
           if types.any? { it.name == "UNKNOWN" } && types.all? { %w[NULL UNKNOWN].include?(it.name) }
@@ -488,7 +500,7 @@ module H2
           when IntervalValue then Intervals.type(node.value.qualifier, 18, 9)
           when true, false then Type.new("BOOLEAN", nil, nil)
           when nil then Type.new("NULL", nil, nil)
-          when RowValue then RowType.new(node.value.values.map { type_of(Literal.new(it)) })
+          when RowValue then node.value.type || RowType.new(node.value.values.map { type_of(Literal.new(it)) })
           when ArrayValue then ArrayType.new(node.value.element_type, node.value.values.length)
           end
         when Unary
@@ -537,7 +549,7 @@ module H2
         when Binary, IntervalDifference then [node.left, node.right]
         when Predicate, Function then node.arguments
         when Aggregate then [*node.arguments, *node.order.map(&:expression), node.filter].compact
-        when Cast then [node.expression]
+        when Cast, FieldReference then [node.expression]
         when TimeZoneExpression then [node.expression, node.zone].compact
         when RowConstructor, ArrayConstructor then node.expressions
         when ArrayElement then [node.array, node.index]
@@ -875,7 +887,7 @@ module H2
         when Literal, TypedLiteral, DecimalLiteral then true
         when TimeZoneExpression then !node.zone.nil? && children(node).all? { constant?(it) }
         when Subquery then subquery_plan(node).constant?
-        when Unary, Binary, IntervalDifference, Predicate, Cast, RowConstructor, ArrayConstructor, ArrayElement, QuantifiedArray,
+        when Unary, Binary, IntervalDifference, Predicate, Cast, RowConstructor, ArrayConstructor, ArrayElement, FieldReference, QuantifiedArray,
           JsonFormat, JsonPredicate, TypePredicate, JsonConstructor then children(node).all? { constant?(it) }
         when Function then FUNCTIONS.key?(node.name) && !AGGREGATES.include?(node.name) && children(node).all? { constant?(it) }
         when CaseExpression
@@ -957,6 +969,7 @@ module H2
         when TimeZoneExpression then node.with(expression: canonical(node.expression), zone: node.zone && canonical(node.zone))
         when RowConstructor, ArrayConstructor then node.with(expressions: node.expressions.map { canonical(it) })
         when ArrayElement then node.with(array: canonical(node.array), index: canonical(node.index))
+        when FieldReference then node.with(expression: canonical(node.expression))
         when QuantifiedArray then node.with(expression: canonical(node.expression), array: canonical(node.array))
         when WhenPredicate then node.with(predicate: canonical(node.predicate))
         when JsonFormat, JsonPredicate, TypePredicate then node.with(expression: canonical(node.expression))

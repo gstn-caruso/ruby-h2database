@@ -53,7 +53,7 @@ module H2
           unless value.type == :row && value.data.length == type.fields.length
             raise Error.new(90030, "Stored row does not match its column type")
           end
-          return RowValue.new(type.fields.each_with_index.map { |field, index| decode(value.data[index], field, context: context) })
+          return RowValue.new(values: type.fields.each_with_index.map { |field, index| decode(value.data[index], field, context: context) }, type: type)
         end
         data = case value.type
         when :date then DateValue.from_packed(value.data)

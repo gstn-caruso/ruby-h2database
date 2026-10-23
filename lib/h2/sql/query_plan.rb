@@ -95,6 +95,7 @@ module H2
         when TimeZoneExpression then node.with(expression: resolve_alias(node.expression, aliases), zone: node.zone && resolve_alias(node.zone, aliases))
         when ArrayConstructor then node.with(expressions: node.expressions.map { resolve_alias(it, aliases) })
         when ArrayElement then node.with(array: resolve_alias(node.array, aliases), index: resolve_alias(node.index, aliases))
+        when FieldReference then node.with(expression: resolve_alias(node.expression, aliases))
         else node
         end
       end
@@ -330,6 +331,9 @@ module H2
         when RowConstructor then "ROW (#{node.expressions.map { expression(it, inside: true) }.join(', ')})"
         when ArrayConstructor then "ARRAY [#{node.expressions.map { expression(it, inside: true) }.join(', ')}]"
         when ArrayElement then "#{expression(node.array, inside: true)}[#{expression(node.index, inside: true)}]"
+        when FieldReference
+          name = node.name.ascii_only? && node.name.match?(/\A[A-Za-z][A-Za-z_0-9]*\z/) && !Parser::RESERVED.include?(node.name.upcase) ? node.name : CharacterString.identifier(node.name)
+          "(#{expression(node.expression, inside: true)}).#{name}"
         when ArrayQuery then "ARRAY (#{query(node.query)})"
         when Subquery then "(#{query(node.query)})"
         when Exists then "EXISTS(#{query(node.query)})"

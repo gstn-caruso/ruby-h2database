@@ -5,10 +5,27 @@ module H2
     ALIASES = {"VARCHAR" => "CHARACTER VARYING", "CHAR" => "CHARACTER", "VARBINARY" => "BINARY VARYING", "DOUBLE" => "DOUBLE PRECISION"}.freeze
     module_function
 
+    def metadata(type, nested: false)
+      return type.type_name if type.is_a?(EnumType)
+      if type.is_a?(RowType)
+        parts = ['ROW(']
+        type.fields.each_with_index do |field, index|
+          parts << ', ' if index.positive?
+          parts.concat([CharacterString.identifier(type.names[index]),' ',metadata(field, nested: true)])
+        end
+        parts << ')'
+      elsif type.is_a?(ArrayType)
+        parts = [metadata(type.element_type, nested: true),' ARRAY',nested && type.precision != ArrayValue::MAX_CARDINALITY ? "[#{type.precision}]" : '']
+      else
+        return format(type)
+      end
+      CharacterString.join(parts)
+    end
+
     def format(type)
       return type.sql if type.is_a?(EnumType)
       if type.is_a?(RowType)
-        return "ROW(#{type.fields.each_with_index.map { |field, index| "\"C#{index + 1}\" #{format(field)}" }.join(', ')})"
+        return "ROW(#{type.fields.each_with_index.map { |field, index| "#{CharacterString.identifier(type.names[index])} #{format(field)}" }.join(', ')})"
       end
       if type.is_a?(ArrayType)
         return "#{format(type.element_type)} ARRAY#{type.precision == ArrayValue::MAX_CARDINALITY ? '' : "[#{type.precision}]"}"

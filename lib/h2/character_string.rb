@@ -4,20 +4,29 @@ module H2
   module CharacterString
     module_function
 
-    def sql(value)
+    def sql(value, delimiter: "'")
       points = sort_key(value).force_encoding(Encoding::UTF_16BE)
       points = points.valid_encoding? ? points.encode(Encoding::UTF_8).codepoints : points.unpack('n*')
-      return "'#{points.pack('U*').gsub("'", "''")}'" if points.all? { (32..127).cover?(it) }
+      return "#{delimiter}#{points.pack('U*').gsub(delimiter, delimiter * 2)}#{delimiter}" if points.all? { (32..127).cover?(it) }
 
       body = points.map do |point|
         if (32...127).cover?(point)
           character = point.chr
-          [39, 92].include?(point) ? character * 2 : character
+          [delimiter.ord, 92].include?(point) ? character * 2 : character
         elsif point <= 0xffff then "\\#{point.to_s(16).rjust(4,'0')}"
         else "\\+#{point.to_s(16).rjust(6,'0')}"
         end
       end.join
-      "U&'#{body}'"
+      "U&#{delimiter}#{body}#{delimiter}"
+    end
+
+    def identifier(value) = sql(value, delimiter: '"')
+
+    def join(parts, separator = '')
+      return parts.join(separator) unless parts.any? { [Encoding::UTF_16BE,Encoding::UTF_16LE].include?(it.encoding) }
+
+      text = parts.map { sort_key(it) }.join(sort_key(separator)).force_encoding(Encoding::UTF_16BE)
+      text.valid_encoding? ? text.encode(Encoding::UTF_8) : text
     end
 
     def sort_key(value)
