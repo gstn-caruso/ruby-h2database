@@ -105,17 +105,16 @@ module H2
       end
 
       def parse_statement
+        return query if query_start? || keyword?("(")
+
         case take.value
-        when "SELECT" then select
-        when "TABLE" then table_query
-        when "VALUES" then values
         when "EXPLAIN" then Explain.new(parse_statement)
         when "CREATE" then create
         when "DROP"
           unsupported unless accept("TABLE")
           exists = accept("IF")
           expect("EXISTS") if exists
-          DropTable.new(table_name, exists)
+          DropTable.new(list { table_name }, exists)
         when "TRUNCATE"
           expect("TABLE")
           Truncate.new(table_name)
@@ -164,6 +163,18 @@ module H2
           expect("EXISTS")
         end
         name = table_name
+        columns, keys = keyword?("(") ? column_definitions : [[], []]
+        source_query = accept("AS") ? query : nil
+        syntax("column definitions or AS query") if columns.empty? && !source_query
+        with_data = true
+        if source_query && accept("WITH")
+          with_data = !accept("NO")
+          expect("DATA")
+        end
+        CreateTable.new(name, columns, keys, if_not_exists, source_query, with_data)
+      end
+
+      def column_definitions
         expect("(")
         columns = []
         keys = []
@@ -201,7 +212,7 @@ module H2
           break unless accept(",")
         end
         expect(")")
-        CreateTable.new(name, columns, keys, if_not_exists)
+        [columns, keys]
       end
 
       def parse_type
@@ -242,11 +253,12 @@ module H2
         if accept("DEFAULT")
           expect("VALUES")
           rows = [nil]
-        else
-          expect("VALUES")
+        elsif accept("VALUES")
           rows = value_rows
+        else
+          source_query = query
         end
-        Insert.new(table, columns, rows)
+        Insert.new(table, columns, rows, source_query)
       end
 
       def update
@@ -260,6 +272,30 @@ module H2
         Update.new(table, assignments, accept("WHERE") ? expression : nil)
       end
 
+      def query_start?
+        %w[SELECT TABLE VALUES].any? { keyword?(it) }
+      end
+
+      def query
+        statement = if accept("(")
+          nested = query
+          expect(")")
+          nested
+        else
+          case take.value
+          when "SELECT" then select
+          when "VALUES" then values
+          when "TABLE" then table_query
+          else syntax("query")
+          end
+        end
+        order, limit, offset = query_tail
+        if !order.empty? || limit || offset
+          statement = statement.with(order: order, limit: limit, offset: offset)
+        end
+        statement
+      end
+
       def select
         distinct = accept("DISTINCT")
         accept("ALL") unless distinct
@@ -267,8 +303,7 @@ module H2
           node = expression
           Projection.new(node, optional_alias)
         end
-        table = accept("FROM") ? table_name : nil
-        alias_name = optional_alias if table
+        source = from_clause if accept("FROM")
         where = expression if accept("WHERE")
         group = if accept("GROUP")
           expect("BY")
@@ -277,20 +312,80 @@ module H2
           []
         end
         having = expression if accept("HAVING")
-        order, limit, offset = query_tail
-        Select.new(projections, table, alias_name, where, group, having, distinct, order, limit, offset)
+        Select.new(projections, source, where, group, having, distinct, [], nil, nil)
       end
 
       def table_query
-        table = table_name
-        order, limit, offset = query_tail
-        Select.new([Projection.new(Star.new(nil), nil)], table, nil, nil, [], nil, false, order, limit, offset)
+        source = TableSource.new(table_name)
+        Select.new([Projection.new(Star.new(nil), nil)], source, nil, [], nil, false, [], nil, nil)
       end
 
       def values
-        rows = value_rows
-        order, limit, offset = query_tail
-        Values.new(rows, order, limit, offset)
+        Values.new(value_rows, [], nil, nil)
+      end
+
+      def from_clause
+        list { table_reference }.reduce do |left, right|
+          JoinSource.new(left, right, :cross, nil, [], false)
+        end
+      end
+
+      def table_reference
+        left = table_primary
+        loop do
+          kind = case current.value
+          when "JOIN" then :inner
+          when "INNER" then :inner
+          when "LEFT" then :left
+          when "RIGHT" then :right
+          when "CROSS" then :cross
+          when "NATURAL" then :natural
+          when "FULL" then syntax("supported join type")
+          else break
+          end
+          token = take.value
+          accept("OUTER") if [:left, :right].include?(kind)
+          expect("JOIN") unless token == "JOIN"
+          right = [:cross, :natural].include?(kind) ? table_primary : table_reference
+          condition = nil
+          using_columns = []
+          unless [:cross, :natural].include?(kind)
+            if accept("ON")
+              condition = expression
+            elsif accept("USING")
+              using_columns = parenthesized_identifiers
+            end
+          end
+          left = JoinSource.new(left, right, kind == :natural ? :inner : kind, condition, using_columns, kind == :natural)
+        end
+        left
+      end
+
+      def table_primary
+        source = if accept("(")
+          nested = query_start? ? DerivedSource.new(query) : from_clause
+          expect(")")
+          nested
+        else
+          name = table_name
+          if accept("(")
+            arguments = keyword?(")") ? [] : list { expression }
+            expect(")")
+            RangeSource.new(name, arguments)
+          else
+            TableSource.new(name)
+          end
+        end
+        name = optional_alias
+        if !name && source.is_a?(DerivedSource)
+          @derived_index ||= 0
+          name = "_#{@derived_index}"
+          @derived_index += 1
+        end
+        return source unless name
+
+        columns = keyword?("(") ? parenthesized_identifiers : nil
+        AliasedSource.new(source, name, columns)
       end
 
       def value_rows

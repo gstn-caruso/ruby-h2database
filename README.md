@@ -33,6 +33,8 @@ end
 
 Parameters are positional values supplied after SQL. `prepare(sql)` returns a reusable statement with `execute(*values)` and `parameter_count`. Strings are copied before use, and results expose frozen columns, row arrays and string values. `rows` preserves duplicate column labels; enumeration produces hashes, where the last value for a repeated label wins.
 
+Queries can combine tables with inner, left, right, cross, natural and `USING` joins, or read derived `SELECT`, `VALUES` and `TABLE` queries. Qualified column references retain their source, and ambiguous names raise an error. `result.types` exposes the initial SQL type information used across query boundaries; precision and other metadata still need full H2 compatibility.
+
 ## Transactions
 
 ```ruby
@@ -50,7 +52,7 @@ As in H2, the implemented DDL commands commit pending changes. The current concu
 
 ## SQL and command line
 
-The implemented subset includes table creation and deletion, basic typed columns, defaults, primary and unique keys, `NOT NULL`, parameterized inserts, updates, deletes, projections, filters, expressions, `VALUES`, ordering, pagination, grouping, distinct results and initial scalar and aggregate functions. The supported subset is detailed in [MIGRATION.md](MIGRATION.md).
+The implemented subset includes table creation and deletion, `CREATE TABLE ... AS`, basic typed columns, defaults, primary and unique keys, `NOT NULL`, parameterized inserts, `INSERT ... SELECT`, updates, deletes, joins, derived tables, projections, filters, expressions, `VALUES`, ordering, pagination, grouping, distinct results and initial scalar and aggregate functions. `SYSTEM_RANGE`/`GENERATE_SERIES` supports ascending and descending ranges; simple counts and limited scans avoid materializing huge ranges. The supported subset is detailed in [MIGRATION.md](MIGRATION.md).
 
 ```sh
 bundle exec h2 --execute "SELECT 1 + 2 AS answer;"
@@ -59,6 +61,17 @@ cat example.sql | bundle exec h2
 ```
 
 Each invocation creates a fresh in-memory database and executes a script. Query results use tab-separated columns with escaped control characters, and SQL errors exit with status 1. `connection.execute(sql)` accepts one statement; `execute_script(sql)` returns a result for each statement in a script. Script execution is sequential and does not add an implicit transaction.
+
+## Compare against the Java reference
+
+With a JDK and Maven configured, build the original source and run the differential suite:
+
+```sh
+mvn -q -f h2/pom.xml -DskipTests package
+bundle exec rake test:reference
+```
+
+This checks selected relational SQL against both engines, including result labels, type names, rows, update counts, errors and SQL states. Java is used only by this optional reference check; the Ruby runtime and native test suite do not require it. CI runs the reference comparison separately on Ruby 3.4 and 4.0.
 
 ## Upstream and license
 

@@ -4,14 +4,15 @@ module H2
   class Result
     include Enumerable
 
-    attr_reader :columns, :rows, :update_count
+    attr_reader :columns, :rows, :update_count, :types
 
-    def initialize(columns: [], rows: [], update_count: nil)
+    def initialize(columns: [], rows: [], update_count: nil, types: nil)
       @columns = columns.map { it.dup.freeze }.freeze
       @rows = rows.map do |row|
         row.map { it.is_a?(String) ? it.dup.freeze : it }.freeze
-      end.freeze
+      end.to_a.freeze
       @update_count = update_count
+      @types = (types || Array.new(columns.length)).freeze
       freeze
     end
 

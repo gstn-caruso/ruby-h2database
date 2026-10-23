@@ -8,10 +8,11 @@ module H2
         "UPPER" => 1..1, "UCASE" => 1..1, "LOWER" => 1..1, "LCASE" => 1..1, "LENGTH" => 1..1, "CHAR_LENGTH" => 1..1,
         "ABS" => 1..1, "COALESCE" => 1..Float::INFINITY, "NULLIF" => 2..2, "MOD" => 2..2}.freeze
 
-      def initialize(parameters, columns = [], qualifiers = [])
+      attr_reader :scope
+
+      def initialize(parameters, columns = [], qualifiers = [], scope: nil)
         @parameters = parameters
-        @columns = columns.to_h { [it.name, it] }
-        @qualifiers = qualifiers.compact
+        @scope = scope || Scope.for_columns(columns, qualifiers)
       end
 
       def validate(node, aggregates: false, inside_aggregate: false)
@@ -19,10 +20,8 @@ module H2
 
         case node
         when ColumnRef
-          unless @columns.key?(node.name) && (node.qualifier.nil? || @qualifiers.include?(node.qualifier))
-            raise Error.new(42122, "Column #{[node.qualifier, node.name].compact.join('.')} not found")
-          end
-        when Literal, Parameter
+          scope.resolve(node)
+        when Literal, Parameter, BoundColumn
           nil
         when Function
           arity = FUNCTIONS[node.name]
@@ -61,7 +60,10 @@ module H2
         return if groups.any? { canonical(it) == canonical(node) }
         return if node.is_a?(Function) && AGGREGATES.include?(node.name)
 
-        raise Error.new(90016, "Column #{node.name} must be in GROUP BY") if node.is_a?(ColumnRef)
+        if node.is_a?(ColumnRef) || node.is_a?(BoundColumn)
+          name = node.is_a?(BoundColumn) ? node.binding.name : node.name
+          raise Error.new(90016, "Column #{name} must be in GROUP BY")
+        end
 
         children(node).each { validate_grouping(it, groups) }
       end
@@ -70,7 +72,8 @@ module H2
         case node
         when Literal then node.value
         when Parameter then @parameters.fetch(node.index)
-        when ColumnRef then row.fetch(node.name)
+        when ColumnRef then row.fetch(scope.resolve(node).key)
+        when BoundColumn then row.fetch(node.binding.key)
         when Unary
           value = evaluate(node.operand, row, group)
           return nil if value.nil?
@@ -108,8 +111,10 @@ module H2
 
       def type_of(node)
         case node
-        when ColumnRef then @columns.fetch(node.name).type
+        when ColumnRef then scope.resolve(node).type
+        when BoundColumn then node.binding.type
         when Cast then node.type
+        when Parameter then type_of(Literal.new(@parameters.fetch(node.index)))
         when Literal
           case node.value
           when Integer
@@ -122,12 +127,24 @@ module H2
             end
             Type.new(name, nil, 0)
           when BigDecimal then Type.new("NUMERIC", nil, [node.value.scale, 0].max)
+          when Float then Type.new("DOUBLE", nil, nil)
+          when String then Type.new("VARCHAR", node.value.length, nil)
+          when true, false then Type.new("BOOLEAN", nil, nil)
+          when nil then Type.new("NULL", nil, nil)
           end
-        when Unary then type_of(node.operand)
-        when Function then type_of(node.arguments.first) if node.name == "ABS"
+        when Unary then node.operator == "NOT" ? Type.new("BOOLEAN", nil, nil) : type_of(node.operand)
+        when Predicate then Type.new("BOOLEAN", nil, nil)
+        when Function then function_type(node)
         when Binary
-          types = [type_of(node.left), type_of(node.right)].compact
-          types.max_by { %w[TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE].index(it.name) || -1 }
+          return Type.new("BOOLEAN", nil, nil) if %w[AND OR = <> != < > <= >=].include?(node.operator)
+          return Type.new("VARCHAR", nil, nil) if node.operator == "||"
+
+          types = [type_of(node.left), type_of(node.right)]
+          type = Type.common(types)
+          if node.operator == "*" && type.name == "NUMERIC"
+            type = type.with(scale: types.compact.sum { it.scale || 0 })
+          end
+          type
         end
       end
 
@@ -145,12 +162,36 @@ module H2
 
       def canonical(node)
         case node
-        when ColumnRef then node.with(qualifier: nil)
+        when ColumnRef then BoundColumn.new(scope.resolve(node))
         when Unary then node.with(operand: canonical(node.operand))
         when Binary then node.with(left: canonical(node.left), right: canonical(node.right))
         when Predicate, Function then node.with(arguments: node.arguments.map { canonical(it) })
         when Cast then node.with(expression: canonical(node.expression))
         else node
+        end
+      end
+
+      def function_type(node)
+        argument_type = type_of(node.arguments.first)
+        case node.name
+        when "COUNT", "LENGTH", "CHAR_LENGTH" then Type.new("BIGINT", nil, 0)
+        when "UPPER", "UCASE", "LOWER", "LCASE" then Type.new("VARCHAR", nil, nil)
+        when "ABS", "MIN", "MAX", "NULLIF" then argument_type
+        when "COALESCE" then Type.common(node.arguments.map { type_of(it) })
+        when "MOD" then type_of(node.arguments.last)
+        when "SUM"
+          return nil unless argument_type
+          case argument_type.name
+          when "TINYINT", "SMALLINT", "INTEGER" then Type.new("BIGINT", nil, 0)
+          when "BIGINT" then Type.new("NUMERIC", 100_000, 0)
+          else argument_type
+          end
+        when "AVG"
+          if argument_type && %w[BIGINT NUMERIC].include?(argument_type.name)
+            Type.new("NUMERIC", 100_000, (argument_type.scale || 0) + 10)
+          else
+            Type.new("DOUBLE", nil, nil)
+          end
         end
       end
 
@@ -303,7 +344,7 @@ module H2
 
       def aggregate(node, group)
         argument = node.arguments.first
-        return group.length if argument.is_a?(Star)
+        return group.size if argument.is_a?(Star)
 
         values = group.map { evaluate(argument, it) }.compact
         values = values.uniq if node.distinct
