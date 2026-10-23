@@ -20,6 +20,7 @@ module H2
       when true then "TRUE"
       when false then "FALSE"
       when BigDecimal then value.to_s("F")
+      when String then BinaryString.text(value)
       else value.to_s
       end
     end
@@ -34,7 +35,7 @@ module H2
       "ROW"
     end
 
-    def convert(value, cast: false)
+    def convert(value, cast: false, source_type: nil)
       return nil if value.nil?
       unless value.is_a?(RowValue)
         raise Error.new(22018, "Cannot convert scalar to a multi-column row") unless fields.length == 1
@@ -45,7 +46,10 @@ module H2
         raise Error.new(21002, "Row column count does not match")
       end
 
-      RowValue.new(fields.each_with_index.map { |type, index| type.convert(value.values[index], cast: cast) })
+      RowValue.new(fields.each_with_index.map do |type, index|
+        field_type = source_type.is_a?(RowType) ? source_type.fields[index] : source_type
+        type.convert(value.values[index], cast: cast, source_type: field_type)
+      end)
     end
   end
 end

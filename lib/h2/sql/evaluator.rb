@@ -6,6 +6,7 @@ module H2
       AGGREGATES = %w[COUNT SUM AVG MIN MAX].freeze
       FUNCTIONS = {"COUNT" => 1..1, "SUM" => 1..1, "AVG" => 1..1, "MIN" => 1..1, "MAX" => 1..1,
         "UPPER" => 1..1, "UCASE" => 1..1, "LOWER" => 1..1, "LCASE" => 1..1, "LENGTH" => 1..1, "CHAR_LENGTH" => 1..1,
+        "OCTET_LENGTH" => 1..1, "BIT_LENGTH" => 1..1,
         "ABS" => 1..1, "COALESCE" => 1..Float::INFINITY, "NULLIF" => 2..2, "MOD" => 2..2}.freeze
 
       attr_reader :scope, :outer_bindings
@@ -36,7 +37,7 @@ module H2
         when Subquery, Exists, InQuery
           validate(node.expression, aggregates: aggregates, inside_aggregate: inside_aggregate) if node.is_a?(InQuery)
           plan = subquery_plan(node)
-          Type.common([type_of(node.expression), query_type(plan)]) if node.is_a?(InQuery)
+          Type.check_comparable(type_of(node.expression), query_type(plan)) if node.is_a?(InQuery)
           plan.outer_bindings.each do |binding|
             @outer_bindings << binding unless scope.local?(binding) || @outer_bindings.include?(binding)
           end
@@ -58,12 +59,22 @@ module H2
             end
             validate(argument, aggregates: aggregates, inside_aggregate: inside_aggregate || aggregate)
           end
+          if %w[SUM AVG].include?(node.name) && %w[BINARY VARBINARY UUID].include?(type_of(node.arguments.first)&.name)
+            raise Error.new(90015, "Invalid type for #{node.name}")
+          end
         when Default, Star
           raise Error.new(42000, "Invalid expression #{node.class.name.split('::').last}")
         else
           children(node).each { validate(it, aggregates: aggregates, inside_aggregate: inside_aggregate) }
           if node.is_a?(Binary) && %w[= <> != < > <= >=].include?(node.operator)
-            Type.common([type_of(node.left), type_of(node.right)])
+            Type.check_comparable(type_of(node.left), type_of(node.right))
+          elsif node.is_a?(Binary) && %w[+ - * / %].include?(node.operator)
+            type = Type.common([type_of(node.left), type_of(node.right)])
+            if %w[BINARY VARBINARY UUID].include?(type.name)
+              raise Error.new(50100, "Arithmetic on #{type.name}")
+            end
+          elsif node.is_a?(Predicate) && [:in, :between, :distinct, :not_distinct].include?(node.operator)
+            node.arguments.drop(1).each { Type.check_comparable(type_of(node.arguments.first), type_of(it)) }
           end
         end
       end
@@ -136,7 +147,7 @@ module H2
           end
         when Binary then binary(node, row, group)
         when Predicate then predicate(node, row, group)
-        when Cast then node.type.convert(evaluate(node.expression, row, group), cast: true)
+        when Cast then node.type.convert(evaluate(node.expression, row, group), cast: true, source_type: type_of(node.expression))
         when Function then function(node, row, group)
         when RowConstructor then RowValue.new(node.expressions.map { evaluate(it, row, group) })
         when Subquery
@@ -190,6 +201,14 @@ module H2
           end
           return 0
         end
+        if left.is_a?(UUIDValue) || right.is_a?(UUIDValue)
+          Type.check_comparable(type_of(Literal.new(left)), type_of(Literal.new(right)))
+          uuid = Type.new("UUID", nil, nil)
+          return uuid.convert(left) <=> uuid.convert(right)
+        elsif BinaryString.binary?(left) || BinaryString.binary?(right)
+          Type.check_comparable(type_of(Literal.new(left)), type_of(Literal.new(right)))
+          return left.b <=> right.b
+        end
         if left.is_a?(Numeric) || right.is_a?(Numeric)
           left = numeric(left)
           right = numeric(right)
@@ -239,7 +258,8 @@ module H2
             Type.new(name, nil, 0)
           when BigDecimal then Type.new("NUMERIC", nil, [node.value.scale, 0].max)
           when Float then Type.new("DOUBLE", nil, nil)
-          when String then Type.new("VARCHAR", node.value.length, nil)
+          when String then Type.new(BinaryString.binary?(node.value) ? "VARBINARY" : "VARCHAR", node.value.length, nil)
+          when UUIDValue then Type.new("UUID", nil, nil)
           when true, false then Type.new("BOOLEAN", nil, nil)
           when nil then Type.new("NULL", nil, nil)
           when RowValue then RowType.new(node.value.values.map { type_of(Literal.new(it)) })
@@ -249,7 +269,10 @@ module H2
         when Function then function_type(node)
         when Binary
           return Type.new("BOOLEAN", nil, nil) if %w[AND OR = <> != < > <= >=].include?(node.operator)
-          return Type.new("VARCHAR", nil, nil) if node.operator == "||"
+          if node.operator == "||"
+            names = [type_of(node.left)&.name, type_of(node.right)&.name]
+            return Type.new((names - %w[BINARY VARBINARY NULL]).empty? && (names & %w[BINARY VARBINARY]).any? ? "VARBINARY" : "VARCHAR", nil, nil)
+          end
 
           types = [type_of(node.left), type_of(node.right)]
           type = Type.common(types)
@@ -392,7 +415,7 @@ module H2
       def function_type(node)
         argument_type = type_of(node.arguments.first)
         case node.name
-        when "COUNT", "LENGTH", "CHAR_LENGTH" then Type.new("BIGINT", nil, 0)
+        when "COUNT", "LENGTH", "CHAR_LENGTH", "OCTET_LENGTH", "BIT_LENGTH" then Type.new("BIGINT", nil, 0)
         when "UPPER", "UCASE", "LOWER", "LCASE" then Type.new("VARCHAR", nil, nil)
         when "ABS", "MIN", "MAX", "NULLIF" then argument_type
         when "COALESCE" then Type.common(node.arguments.map { type_of(it) })
@@ -414,6 +437,9 @@ module H2
       end
 
       def numeric(value)
+        if BinaryString.binary?(value) || value.is_a?(UUIDValue)
+          raise Error.new(50100, "Numeric operation on binary or UUID values")
+        end
         return value if value.is_a?(Numeric)
         return value ? 1 : 0 if value == true || value == false
 
@@ -465,7 +491,12 @@ module H2
           when "<=" then comparison <= 0
           when ">=" then comparison >= 0
           end
-        when "||" then (left.to_s + right.to_s).freeze
+        when "||"
+          if type_of(node).name == "VARBINARY"
+            (left.b + right.b).freeze
+          else
+            (BinaryString.text(left) + BinaryString.text(right)).freeze
+          end
         else
           left, right = numeric(left), numeric(right)
           if %w[/ %].include?(node.operator) && right.zero?
@@ -545,7 +576,7 @@ module H2
         if node.name == "COALESCE"
           node.arguments.each do |argument|
             value = evaluate(argument, row, group)
-            return value unless value.nil?
+            return function_type(node).convert(value, cast: true, source_type: type_of(argument)) unless value.nil?
           end
           return nil
         end
@@ -559,9 +590,20 @@ module H2
         return nil if values.any?(&:nil?)
 
         case node.name
-        when "UPPER", "UCASE" then first.to_s.upcase.freeze
-        when "LOWER", "LCASE" then first.to_s.downcase.freeze
-        when "LENGTH", "CHAR_LENGTH" then first.to_s.length
+        when "UPPER", "UCASE" then BinaryString.text(first).upcase.freeze
+        when "LOWER", "LCASE" then BinaryString.text(first).downcase.freeze
+        when "LENGTH", "CHAR_LENGTH"
+          text = BinaryString.text(first)
+          if BinaryString.binary?(first)
+            first.bytesize
+          elsif [Encoding::UTF_16BE, Encoding::UTF_16LE].include?(text.encoding)
+            text.bytesize / 2
+          else
+            text.encode(Encoding::UTF_16BE).bytesize / 2
+          end
+        when "OCTET_LENGTH", "BIT_LENGTH"
+          length = BinaryString.encode(first, source_type: type_of(node.arguments.first)).bytesize
+          node.name == "BIT_LENGTH" ? length * 8 : length
         when "ABS" then check_integer(numeric(first).abs, node)
         when "MOD"
           raise Error.new(22012, "Division by zero") if numeric(second).zero?

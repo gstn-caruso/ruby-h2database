@@ -76,6 +76,9 @@ module H2
 
           default = if evaluator.contains_subquery?(column.default)
             CapturedExpression.new(column.default, @parameters.dup.freeze)
+          elsif %w[BINARY VARBINARY].include?(column.type.name)
+            evaluator.evaluate(column.default)
+            CapturedExpression.new(column.default, @parameters.dup.freeze)
           else
             Literal.new(evaluator.evaluate(column.default))
           end
@@ -87,6 +90,7 @@ module H2
             columns = result.columns.each_with_index.map do |name, index|
               type = result.types[index]
               raise Error.new(50100, "Cannot infer type for #{name}") unless type
+              type = type.with(precision: 1) if type.name == "VARBINARY" && type.precision == 0
 
               Column.new(name, type, true, nil)
             end
@@ -95,7 +99,8 @@ module H2
         end
         target = Table.new(statement.name, columns, statement.keys)
         if result && statement.with_data
-          result.rows.each { target.rows << target.convert_row(columns.map(&:name).zip(it).to_h) }
+          source_types = columns.map(&:name).zip(result.types).to_h
+          result.rows.each { target.rows << target.convert_row(columns.map(&:name).zip(it).to_h, source_types: source_types) }
         end
         change(target, 0)
       end
@@ -118,13 +123,19 @@ module H2
             raise Error.new(21002, "Column count does not match")
           end
           supplied = expressions ? names.zip(expressions).to_h : {}
+          source_types = {}
           row = target.columns.to_h do |column|
             expression = supplied.fetch(column.name, Default.new)
             expression, value_evaluator = expression.is_a?(Default) ? default_expression(column, evaluator) : [expression, evaluator]
             value_evaluator.validate(expression)
+            source_types[column.name] = if result && supplied.key?(column.name) && !supplied[column.name].is_a?(Default)
+              result.types[names.index(column.name)]
+            else
+              value_evaluator.type_of(expression)
+            end
             [column.name, value_evaluator.evaluate(expression)]
           end
-          target.rows << target.convert_row(row)
+          target.rows << target.convert_row(row, source_types: source_types)
         end
         change(target, source_rows.length)
       end
@@ -140,13 +151,14 @@ module H2
           [name, expression, value_evaluator]
         end
         evaluator.validate(statement.where)
+        source_types = assignments.to_h { |name, expression, value_evaluator| [name, value_evaluator.type_of(expression)] }
         count = 0
         target.rows.map! do |row|
           next row unless matches?(evaluator, statement.where, row)
 
           values = assignments.to_h { |name, expression, value_evaluator| [name, value_evaluator.evaluate(expression, row)] }
           count += 1
-          target.convert_row(row.merge(values), existing_row: row)
+          target.convert_row(row.merge(values), existing_row: row, source_types: source_types)
         end
         change(target, count)
       end

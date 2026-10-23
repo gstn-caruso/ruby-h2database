@@ -5,7 +5,7 @@ require_relative "support/upstream_script"
 
 class UpstreamTest < DatabaseTest
   ROOT = File.expand_path("../h2/src/test/org/h2/test/scripts", __dir__)
-  COMPLETE_SCRIPTS = %w[datatypes/int.sql functions/string/upper.sql functions/string/lower.sql
+  COMPLETE_SCRIPTS = %w[datatypes/int.sql datatypes/uuid.sql functions/string/upper.sql functions/string/lower.sql
     functions/system/coalesce.sql functions/numeric/mod.sql functions/system/nullif.sql].freeze
 
   COMPLETE_SCRIPTS.each do |path|
@@ -40,6 +40,16 @@ class UpstreamTest < DatabaseTest
   def test_original_table_first_seven_statements
     script = UpstreamScript.new(File.join(ROOT, "queries/table.sql"))
     script.cases.first(7).each { check_case(it) }
+  end
+
+  def test_original_binary_statements_except_metadata_and_settings
+    script = UpstreamScript.new(File.join(ROOT, "datatypes/binary.sql"))
+    [0, 2, *(3..9), 11, 14].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_varbinary_statements_except_metadata_tools_modes_and_settings
+    script = UpstreamScript.new(File.join(ROOT, "datatypes/varbinary.sql"))
+    [0, 2, *(7..20), *(28..31), 33, 36, 37].each { check_case(script.cases.fetch(it)) }
   end
 
   private
@@ -85,7 +95,7 @@ class UpstreamTest < DatabaseTest
     when true then "TRUE"
     when false then "FALSE"
     when BigDecimal then value.to_s("F")
-    when String then value.gsub("\r\n", "\n").tr("\n", " ").gsub(/ +/, " ")
+    when String then H2::BinaryString.binary?(value) ? "X'#{value.unpack1('H*')}'" : value.gsub("\r\n", "\n").tr("\n", " ").gsub(/ +/, " ")
     else value.to_s
     end
   end

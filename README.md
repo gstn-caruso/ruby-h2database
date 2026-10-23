@@ -39,6 +39,23 @@ Scalar and correlated subqueries work in expressions, `EXISTS`, `IN`/`NOT IN`, i
 
 Query preparation validates reachable expressions and inner scopes before scanning rows. As in H2, derived tables, range arguments and pagination expressions cannot refer to an outer query. Defaults containing subqueries read the current data when used and retain any parameters supplied when the table was created.
 
+## Binary and UUID values
+
+`BINARY(n)` pads with zero bytes; `VARBINARY(n)` / `BINARY VARYING(n)` preserves length. Assignment rejects oversized values, while explicit casts truncate. SQL hexadecimal literals use `X'00ff'`; binary parameters and results use frozen copies of Ruby strings with `Encoding::BINARY` (`ASCII-8BIT`). Use `.b` when binding bytes. Text-to-binary conversion uses UTF-8. Binary-to-text conversion follows Java's UTF-8 replacement behavior for malformed input.
+
+```ruby
+uuid = H2::UUIDValue.parse("01234567-89ab-cdef-0123-456789abcdef")
+H2.connect do |connection|
+  connection.execute("CREATE TABLE objects(id UUID PRIMARY KEY, bytes VARBINARY)")
+  connection.execute("INSERT INTO objects VALUES(?, ?)", uuid, "\x00\xff".b)
+  id, bytes = connection.execute("TABLE objects").rows.first
+  p id.to_s  # => "01234567-89ab-cdef-0123-456789abcdef"
+  p bytes    # => "\x00\xFF"
+end
+```
+
+`UUID '...'` supplies a typed literal. UUID casts accept H2's textual UUID form or exactly 16 binary bytes. `H2::UUIDValue` is immutable, exposes `.bytes`, and formats canonical lowercase text with `.to_s`. Both types work in defaults, key constraints, comparisons, ordering, initial ROW values and persisted tables/indexes. Integer/binary casts retain signed big-endian widths. `LENGTH` / `CHAR_LENGTH`, `OCTET_LENGTH` and `BIT_LENGTH` distinguish character, binary, integer and UUID representations. Full type metadata, UUID generation functions and remaining binary functions still need migration. Empty binary columns inferred by native CTAS use precision 1 so their saved declarations can reopen; the Java snapshot's zero-precision metadata limitation is recorded in [MIGRATION.md](MIGRATION.md).
+
 ## Persistent SQL databases
 
 Create a new database and reopen it in a later connection or process:
@@ -101,7 +118,7 @@ H2::MVStore::Store.open("values.mv") do |store|
 end
 ```
 
-`Value#type` preserves SQL type identity, `#data` exposes its immutable storage representation, and `#to_ruby` converts initial scalars and nested collections. `Decimal` retains both the unscaled integer and scale. Temporal values currently expose H2's packed date/nanosecond/offset fields; LOB references retain identifiers and lengths without fetching external content. These codecs do not add their types to the SQL parser or expression evaluator.
+`Value#type` preserves SQL type identity, `#data` exposes its immutable storage representation, and `#to_ruby` converts initial scalars and nested collections. `Decimal` retains both the unscaled integer and scale. Temporal values currently expose H2's packed date/nanosecond/offset fields; LOB references retain identifiers and lengths without fetching external content. Storage codecs cover more types than the SQL parser and expression evaluator currently support.
 
 Existing `table.<object_id>` and `index.<object_id>` maps can be opened with inferred registered codecs. Table entries contain `VersionedValue` objects with `current`, `committed`, `operation_id` and `entry_id`; current row fields are in `SearchRow#values`. This is low-level access: callers editing these maps must maintain table/index consistency. The SQL API maintains the supported table/index/catalog relationships itself.
 
@@ -144,7 +161,7 @@ bundle exec h2 example.sql
 cat example.sql | bundle exec h2
 ```
 
-An invocation uses a fresh in-memory database unless `--database PATH` is supplied. File options include `--read-only`, `--user NAME` and `--password PASSWORD`. Query results use tab-separated columns with escaped control characters, and SQL errors exit with status 1. `connection.execute(sql)` accepts one statement; `execute_script(sql)` returns a result for each statement in a script. Script execution is sequential and does not add an implicit transaction.
+An invocation uses a fresh in-memory database unless `--database PATH` is supplied. File options include `--read-only`, `--user NAME` and `--password PASSWORD`. Query results use tab-separated columns with escaped control characters; binary columns print hexadecimal `X'...'` literals, and SQL errors exit with status 1. `connection.execute(sql)` accepts one statement; `execute_script(sql)` returns a result for each statement in a script. Script execution is sequential and does not add an implicit transaction.
 
 ## Compare against the Java reference
 
@@ -155,7 +172,7 @@ mvn -q -f h2/pom.xml -DskipTests package
 bundle exec rake test:reference
 ```
 
-This checks the relational and subquery SQL fixtures against both engines, including result labels, type names, rows, update counts, errors and SQL states. It also cross-reads and cross-writes MVStore files with all three compression modes, checks B-tree lookups, preserves unopened maps, verifies file locks in both directions, and recovers commits after process death. Storage tests exercise real SQL rows/indexes and prepared transactions. The persistent SQL suite creates databases with each engine, exchanges SQL changes, reopens through both engines, verifies defaults/keys/row ids/credentials/DDL, and kills writers before commit, after commit and after the durable decision. The reference task reports the Java commit-marker recovery limitation separately. Java is used only by this optional reference check; the Ruby runtime and native test suite do not require it. CI runs the reference comparison separately on Ruby 3.4 and 4.0.
+This checks the relational, subquery and binary/UUID SQL fixtures against both engines, including result labels, type names, rows, update counts, errors and SQL states. Top-level binary result columns are compared byte-for-byte through JDBC `getBytes`, and a generated UTF-8 comparison covers every byte pair plus multibyte boundaries. It also cross-reads and cross-writes MVStore files with all three compression modes, checks B-tree lookups, preserves unopened maps, verifies file locks in both directions, and recovers commits after process death. Storage tests exercise real SQL rows/indexes and prepared transactions. The persistent SQL suite creates databases with each engine, exchanges SQL changes, reopens through both engines, verifies defaults/keys/row ids/credentials/DDL, and kills writers before commit, after commit and after the durable decision. The reference task reports the Java commit-marker recovery and zero-precision metadata limitations explicitly. Java is used only by this optional reference check; the Ruby runtime and native test suite do not require it. CI runs the reference comparison separately on Ruby 3.4 and 4.0.
 
 ## Upstream and license
 

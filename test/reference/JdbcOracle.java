@@ -7,6 +7,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.util.Base64;
 
 public class JdbcOracle {
@@ -36,8 +37,15 @@ public class JdbcOracle {
                             while (result.next()) {
                                 StringBuilder row = new StringBuilder("R");
                                 for (int column = 1; column <= metadata.getColumnCount(); column++) {
-                                    String value = result.getString(column);
-                                    row.append('\t').append(value == null ? "N" : "V" + encode(value));
+                                    int type = metadata.getColumnType(column);
+                                    if ((type == Types.BINARY || type == Types.VARBINARY || type == Types.LONGVARBINARY)
+                                            && !"UUID".equals(metadata.getColumnTypeName(column))) {
+                                        byte[] value = result.getBytes(column);
+                                        row.append('\t').append(value == null ? "N" : "B" + Base64.getEncoder().encodeToString(value));
+                                    } else {
+                                        String value = result.getString(column);
+                                        row.append('\t').append(value == null ? "N" : "V" + encode(value));
+                                    }
                                 }
                                 System.out.println(row);
                             }

@@ -2,6 +2,8 @@
 
 require_relative "h2/version"
 require_relative "h2/error"
+require_relative "h2/uuid_value"
+require_relative "h2/binary_string"
 require_relative "h2/row_value"
 require_relative "h2/type"
 require_relative "h2/result"

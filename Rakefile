@@ -10,6 +10,7 @@ namespace :test do
   desc "Compare SQL and MVStore behavior against the built Java reference"
   task :reference do
     Dir["test/fixtures/*_reference.sql"].sort.each { ruby "test/reference/compare.rb", it }
+    ruby "test/reference/binary_values.rb"
     ruby "test/reference/mvstore.rb"
     ruby "test/reference/sql_storage.rb"
     ruby "test/reference/transactions.rb"

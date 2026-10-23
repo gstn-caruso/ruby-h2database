@@ -2,10 +2,25 @@
 
 module H2
   class Type < Data.define(:name, :precision, :scale)
-    ORDER = %w[NULL CHAR VARCHAR BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE].freeze
+    ORDER = %w[NULL CHAR VARCHAR BINARY VARBINARY BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE UUID].freeze
     INTEGER_LIMITS = {"TINYINT" => (-128..127), "SMALLINT" => (-32_768..32_767),
       "INTEGER" => (-2_147_483_648..2_147_483_647),
       "BIGINT" => (-9_223_372_036_854_775_808..9_223_372_036_854_775_807)}.freeze
+
+    def self.check_comparable(left, right)
+      if left.is_a?(RowType) && right.is_a?(RowType) && left.fields.length == right.fields.length
+        left.fields.zip(right.fields).each { check_comparable(*it) }
+      elsif left && right && !left.is_a?(RowType) && !right.is_a?(RowType)
+        names = [left.name, right.name]
+        binary = (names & %w[BINARY VARBINARY]).any?
+        uuid = names.include?("UUID")
+        if (binary && (names - %w[NULL BINARY VARBINARY UUID]).any?) ||
+            (uuid && (names - %w[NULL CHAR VARCHAR BINARY VARBINARY UUID]).any?)
+          raise Error.new(90110, "SQL types #{names.join(', ')} are not comparable")
+        end
+      end
+      common([left, right])
+    end
 
     def self.common(types)
       types = types.compact.reject { it.name == "NULL" }
@@ -21,6 +36,11 @@ module H2
       end
 
       name = types.max_by { ORDER.index(it.name) || -1 }.name
+      names = types.map(&:name)
+      if (names.include?("UUID") && (names - %w[UUID CHAR VARCHAR BINARY VARBINARY]).any?) ||
+          ((names & %w[BINARY VARBINARY]).any? && (names & %w[BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE]).any?)
+        raise Error.new(22018, "Incompatible SQL types #{names.join(', ')}")
+      end
       precision = types.any? { it.precision.nil? } ? nil : types.map(&:precision).max
       scale = types.filter_map(&:scale).max
       if name == "NUMERIC"
@@ -30,7 +50,7 @@ module H2
       new(name, precision, scale)
     end
 
-    def convert(value, cast: false)
+    def convert(value, cast: false, source_type: nil)
       return nil if value.nil?
 
       case name
@@ -43,7 +63,7 @@ module H2
         when true then "TRUE"
         when false then "FALSE"
         when BigDecimal then value.to_s("F")
-        else value.to_s
+        else BinaryString.text(value)
         end
         if precision && text.length > precision
           unless cast || (name == "CHAR" && text[precision..].match?(/\A *\z/))
@@ -53,6 +73,19 @@ module H2
         end
 
         (name == "CHAR" && precision ? text.ljust(precision) : text).dup.freeze
+      when "BINARY", "VARBINARY"
+        bytes = BinaryString.encode(value, source_type: source_type)
+        if precision && bytes.bytesize > precision
+          raise Error.new(22001, "Value too long for #{name}(#{precision})") unless cast
+
+          bytes = bytes.byteslice(0, precision)
+        end
+        bytes = bytes.ljust(precision, "\x00".b) if name == "BINARY" && precision
+        bytes.b.freeze
+      when "UUID"
+        return value if value.is_a?(UUIDValue)
+
+        BinaryString.binary?(value) ? UUIDValue.new(value) : UUIDValue.parse(value)
       when "NUMERIC"
         decimal = BigDecimal(numeric_input(value).to_s)
         raise Error.new(22018, "Non-finite NUMERIC value") unless decimal.finite?
@@ -78,6 +111,9 @@ module H2
     private
 
     def numeric_input(value)
+      if BinaryString.binary?(value) || value.is_a?(UUIDValue)
+        raise Error.new(22018, "Cannot convert binary or UUID to #{name}")
+      end
       return 1 if value == true
       return 0 if value == false
 
@@ -85,6 +121,13 @@ module H2
     end
 
     def integer(value)
+      if BinaryString.binary?(value)
+        format = BinaryString::INTEGER_PACK.fetch(name)
+        width = {"TINYINT" => 1, "SMALLINT" => 2, "INTEGER" => 4, "BIGINT" => 8}.fetch(name)
+        raise Error.new(22018, "#{name} requires #{width} binary bytes") unless value.bytesize == width
+
+        return value.unpack1(format)
+      end
       number = case value
       when Integer then value
       when Numeric then value.round(0, half: :up).to_i
@@ -98,6 +141,9 @@ module H2
     end
 
     def boolean(value)
+      if BinaryString.binary?(value) || value.is_a?(UUIDValue)
+        raise Error.new(22018, "Cannot convert binary or UUID to BOOLEAN")
+      end
       case value
       when true, false then value
       when Numeric then !value.zero?
