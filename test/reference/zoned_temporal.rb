@@ -28,7 +28,8 @@ unless data_differences.empty?
   data_differences.each do |profile|
     a, b = [java_offsets.fetch(profile), system_offsets.fetch(profile)]
     changed_version = a.zero? ? java_version : system_version
-    unless [a, b].sort == [0, 3600] && changed_version >= "2026e"
+    previous_version = a.zero? ? system_version : java_version
+    unless [a, b].sort == [0, 3600] && changed_version >= "2026c" && previous_version < "2026c"
       abort "Unexpected Casablanca tzdb difference: system #{system_version} / Java #{java_version}, #{profile.inspect}: #{b} / #{a}"
     end
   end
@@ -145,5 +146,5 @@ unless independent_cases.empty?
       end
     end
   end
-  puts "Timezone data difference: #{independent_cases.length} Casablanca future cases use system tzdb #{system_version}, differing from Java #{java_version}; native values/casts match the independent system clock (IANA 2026e change)"
+  puts "Timezone data difference: #{independent_cases.length} Casablanca future cases use system tzdb #{system_version}, differing from Java #{java_version}; native values/casts match the independent system clock (IANA 2026c change)"
 end
