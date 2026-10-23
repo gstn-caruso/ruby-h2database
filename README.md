@@ -52,7 +52,7 @@ end
 
 Transaction blocks commit on normal completion and roll back on exceptions or nonlocal exits. Nested blocks restore a savepoint on failure. SQL `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `ROLLBACK TO SAVEPOINT` and `SET AUTOCOMMIT` are also available.
 
-As in H2, the implemented DDL commands commit pending changes. The current concurrency mechanism detects conflicts at table granularity. Row locks, full MVCC and the remaining isolation levels are still pending.
+As in H2, the implemented DDL commands commit pending changes. The SQL executor currently detects conflicts at table granularity. Its integration with the separate MVStore transaction API, full MVCC and the remaining isolation levels are still pending.
 
 ## MVStore files
 
@@ -86,7 +86,31 @@ Existing `table.<object_id>` and `index.<object_id>` maps can be opened with inf
 
 `commit` appends a chunk and synchronizes it before publishing the duplicated file headers. `rollback` restores the last commit; handles for maps created after that commit become invalid. Closing a writable store commits pending changes, including the block form. Compression options are `:none`, `:fast` (LZF) and `:high` (DEFLATE). Read-only opens share a lock; a writable open excludes other readers and writers, including Java processes. File locking currently requires 64-bit Linux on x86_64 or aarch64; local and CI verification use x86_64.
 
-`H2::MVStore::Error#code` exposes MVStore error numbers, separately from SQL errors: 2 for write failures/read-only mutation, 4 for closed handles, 5 for unsupported formats or codecs, 6 for corruption, and 7 for conflicting locks. Full transaction-store behavior, SQL database lifecycle, collations, encryption, external LOB content and compaction remain pending. Some typed-key comparisons, including non-ASCII case-insensitive strings and zoned temporal/interval keys, explicitly fail as unsupported. Opened maps currently materialize sorted entries and use binary search; each changed map is rewritten on commit.
+`H2::MVStore::Error#code` exposes MVStore error numbers, separately from SQL errors: 2 for write failures/read-only mutation, 4 for closed handles, 5 for unsupported formats or codecs, 6 for corruption, and 7 for conflicting locks. SQL database lifecycle, remaining transaction-store behavior, collations, encryption, external LOB content and compaction remain pending. Some typed-key comparisons, including non-ASCII case-insensitive strings and zoned temporal/interval keys, explicitly fail as unsupported. Opened maps currently materialize sorted entries and use binary search; each changed map is rewritten on commit.
+
+## MVStore transactions
+
+```ruby
+require "h2/mvstore"
+
+H2::MVStore::TransactionStore.open("accounts.mv", timeout_ms: 1000) do |store|
+  store.transaction do |tx|
+    accounts = tx.open_map("accounts", key_type: :string, value_type: :long)
+    accounts["Ada"] = 100
+    savepoint = tx.savepoint
+    accounts["Ada"] = 50
+    tx.rollback_to(savepoint)
+  end
+end
+```
+
+This API implements initial READ COMMITTED transactions over versioned maps. Reads see their own writes and committed values from other transactions. Conflicting writes wait up to `timeout_ms`; writes to other keys can proceed. A wait cycle aborts the youngest transaction and releases its rows. Transaction blocks commit on normal completion and roll back on exceptions or nonlocal exits. `begin_transaction` exposes explicit `commit`, `rollback`, numeric savepoints and `prepare(name:)`. Other isolation levels explicitly fail as unsupported.
+
+Transaction maps support enumeration, `put` (returns the old value), `put_if_absent`, `try_put`, `lock`, `delete` and transactional `clear`. New maps default to string keys/values; their codecs are registered in the H2 type registry and inferred on reopen. Transaction creation supports a `max_transactions` limit from 1 through 255. Errors include 100 for corrupt transaction metadata, 101 for lock timeout/conflict, 102 for exhausted slots, 103 for invalid transaction state, and 105 for a deadlock victim.
+
+`commit` synchronizes an H2 undo-log commit marker before rewriting committed values and clearing the log. A failure after that durable decision can recover as committed. `checkpoint` persists open transactions without committing them. Closing the store synchronizes outstanding state; the next writable open rolls back interrupted open transactions and finishes recorded commit decisions. Prepared transactions remain in `in_doubt` for explicit commit/rollback, and read-only opens cannot resolve them. Use the transaction API for updates to coordinated maps; direct raw-map edits bypass its undo and locking rules.
+
+These are initial storage transactions, separate from `H2.connect`. Snapshot/statement isolation, the remaining isolation levels, complete recovery/upgrade behavior and scalable page/cursor handling remain open. The preserved Java snapshot has a reproduced commit-marker recovery bug; native recovery completes that decision. [MIGRATION.md](MIGRATION.md) records the difference and the precise cross-engine evidence.
 
 ## SQL and command line
 
@@ -109,7 +133,7 @@ mvn -q -f h2/pom.xml -DskipTests package
 bundle exec rake test:reference
 ```
 
-This checks the relational and subquery SQL fixtures against both engines, including result labels, type names, rows, update counts, errors and SQL states. It also cross-reads and cross-writes MVStore files with all three compression modes, checks B-tree lookups, preserves unopened maps, verifies file locks in both directions, and recovers a commit after process death. SQL storage checks read 180 rows with 18 columns and two indexes, modify a row/index from Ruby, reopen through JDBC, and preserve pending transaction data so Java can recover it. Java is used only by this optional reference check; the Ruby runtime and native test suite do not require it. CI runs the reference comparison separately on Ruby 3.4 and 4.0.
+This checks the relational and subquery SQL fixtures against both engines, including result labels, type names, rows, update counts, errors and SQL states. It also cross-reads and cross-writes MVStore files with all three compression modes, checks B-tree lookups, preserves unopened maps, verifies file locks in both directions, and recovers a commit after process death. SQL storage checks read 180 rows with 18 columns and two indexes, modify a row/index from Ruby, reopen through JDBC, and preserve pending transaction data so Java can recover it. Transaction checks compare operation traces, exchange undo logs and prepared transactions, and kill writing processes at open/prepared/commit-decision stages. The reference task reports the Java commit-marker recovery limitation separately. Java is used only by this optional reference check; the Ruby runtime and native test suite do not require it. CI runs the reference comparison separately on Ruby 3.4 and 4.0.
 
 ## Upstream and license
 

@@ -178,10 +178,25 @@ public class SQLStorageOracle {
         }
     }
 
+    private static void pendingSQL(String path) throws Exception {
+        createSQL(path);
+        java.sql.Connection connection = connection(path, false);
+        connection.setAutoCommit(false);
+        java.sql.Statement statement = connection.createStatement();
+        statement.execute("UPDATE TEST SET TXT='uncommitted', N=-100.25 WHERE ID=1");
+        statement.execute("INSERT INTO TEST(ID, TXT, N) VALUES(1000, 'discarded', 99)");
+        statement.execute("DELETE FROM TEST WHERE ID=180");
+        org.h2.engine.SessionLocal session = (org.h2.engine.SessionLocal)((org.h2.jdbc.JdbcConnection)connection).getSession();
+        MVStore store = session.getDatabase().getStore().getMvStore();
+        store.commit();
+        store.closeImmediately();
+    }
+
     public static void main(String[] args) throws Exception {
         if (args[0].equals("vectors")) vectors();
         else if (args[0].equals("meta-vectors")) metaVectors();
         else if (args[0].equals("create-sql")) createSQL(args[1]);
+        else if (args[0].equals("pending-sql")) pendingSQL(args[1]);
         else if (args[0].equals("dump-sql")) dumpSQL(args[1]);
         else if (args[0].equals("create-pending")) pending(args[1], false);
         else if (args[0].equals("recover-pending")) pending(args[1], true);

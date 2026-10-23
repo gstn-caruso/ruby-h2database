@@ -69,8 +69,8 @@ module H2
         include Type
         STATELESS = {"org.h2.mvstore.type.StringDataType" => STRING, "org.h2.mvstore.type.LongDataType" => LONG,
           "org.h2.mvstore.type.ByteArrayDataType" => ByteArrayType.new.freeze,
-          "org.h2.mvstore.db.NullValueDataType" => NullType.new.freeze}.freeze
-        UNPORTED = %w[org.h2.mvstore.db.LobStorageMap$BlobMeta$Type org.h2.mvstore.db.LobStorageMap$BlobReference$Type org.h2.mvstore.type.ObjectDataType].freeze
+          "org.h2.mvstore.db.NullValueDataType" => NullType.new.freeze, "org.h2.mvstore.type.ObjectDataType" => OBJECT}.freeze
+        UNPORTED = %w[org.h2.mvstore.db.LobStorageMap$BlobMeta$Type org.h2.mvstore.db.LobStorageMap$BlobReference$Type].freeze
 
         def copy(codec)
           raise ArgumentError, "Expected a storage codec" unless codec.is_a?(Type)

@@ -55,6 +55,16 @@ module H2
         @store.synchronize { check_open; @records.size }
       end
 
+      def clear
+        @store.synchronize do
+          check_open
+          @store.check_writable
+          @dirty = true unless @records.empty?
+          @records.clear
+        end
+        self
+      end
+
       def each
         return enum_for(__method__) { size } unless block_given?
 

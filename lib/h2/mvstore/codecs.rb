@@ -121,6 +121,7 @@ module H2
         return VALUE if name == :value
         return META if name == :meta
         return BYTES if name == :bytes
+        return OBJECT if name == :object
 
         TYPES.fetch(name) { raise Error.new(5, "Data type #{name.inspect} has not been ported") }
       end
