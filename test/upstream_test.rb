@@ -77,6 +77,16 @@ class UpstreamTest < DatabaseTest
     [*(0..2), *(6..39)].each { check_case(script.cases.fetch(it)) }
   end
 
+  def test_original_dateadd_statements_except_zoned_values
+    script = UpstreamScript.new(File.join(ROOT, "functions/timeanddate/dateadd.sql"))
+    [*(0..9), 13, 15, *(19..28), 30, 36, *(39..42)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_datediff_statements_except_zoned_values
+    script = UpstreamScript.new(File.join(ROOT, "functions/timeanddate/datediff.sql"))
+    [*(0..37), *(46..59)].each { check_case(script.cases.fetch(it)) }
+  end
+
   private
 
   def check_case(scenario)

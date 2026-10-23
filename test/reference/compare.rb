@@ -15,7 +15,7 @@ fixture = ARGV.first || File.join(root, "test/fixtures/relational_reference.sql"
 statements = (fixture == "-" ? $stdin.readlines : File.readlines(fixture)).map(&:strip).reject { it.empty? || it.start_with?("--") }
 decode = ->(text) { text.unpack1("m0").force_encoding(Encoding::UTF_8) }
 input = statements.map { [it].pack("m0") }.join("\n") + "\n"
-output, error, status = Open3.capture3(java, "-cp", jar, File.join(__dir__, "JdbcOracle.java"), stdin_data: input)
+output, error, status = Open3.capture3(java, "-Duser.language=en", "-Duser.country=US", "-cp", jar, File.join(__dir__, "JdbcOracle.java"), stdin_data: input)
 abort error unless status.success?
 reference = output.split("END\n").map { it.lines.map(&:chomp) }
 abort "Java reference returned #{reference.length} results for #{statements.length} statements" unless reference.length == statements.length

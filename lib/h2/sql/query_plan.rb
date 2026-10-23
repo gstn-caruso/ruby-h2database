@@ -273,6 +273,8 @@ module H2
         when Function
           if node.name == "EXTRACT"
             "EXTRACT(#{node.arguments.first.value} FROM #{expression(node.arguments.last, inside: true)})"
+          elsif DateTimeFunctions::NAMES.include?(node.name)
+            "#{node.name}(#{node.arguments.first.value}, #{node.arguments.drop(1).map { expression(it, inside: true) }.join(', ')})"
           else
             "#{node.name}(#{node.distinct ? 'DISTINCT ' : ''}#{node.arguments.map { expression(it, inside: true) }.join(', ')})"
           end
@@ -282,6 +284,7 @@ module H2
           type = node.type
           name = type.name == "VARBINARY" ? "BINARY VARYING" : type.name
           name += "(#{type.precision})" if %w[BINARY VARBINARY].include?(type.name) && type.precision
+          name += "(#{type.scale})" if %w[TIME TIMESTAMP].include?(type.name) && type.scale != (type.name == "TIME" ? 0 : 6)
           "CAST(#{expression(node.expression, inside: true)} AS #{name})"
         when RowConstructor then "ROW (#{node.expressions.map { expression(it, inside: true) }.join(', ')})"
         when Subquery then "(#{query(node.query)})"
