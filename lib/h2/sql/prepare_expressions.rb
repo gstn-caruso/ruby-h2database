@@ -13,6 +13,7 @@ module H2
         return node.with(default: prepare(node.default)) if node.is_a?(Column)
         return node unless node.is_a?(Data) && node.class.name.start_with?("H2::SQL::")
         return node if node.is_a?(TypedLiteral) || node.is_a?(CapturedExpression)
+        return node if node.is_a?(Ordering)
 
         if node.is_a?(WhenPredicate)
           predicate = node.predicate.with(**node.predicate.to_h.transform_values { prepare(it) })
@@ -60,13 +61,26 @@ module H2
         if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name)
           return MathFunctions.literal(value, type)
         end
+        if node.is_a?(Function) && %w[COALESCE IFNULL].include?(node.name) && value.is_a?(BigDecimal)
+          return NumericOperations.literal(value, type)
+        end
         cast = (value.nil? && type.name != "NULL") || (node.is_a?(Cast) && Temporal::NAMES.include?(type.name) && type.name != "DATE" && type.scale != 9)
         if node.is_a?(Cast) && type.is_a?(ArrayType) && value
           cast = type.precision != value.values.length || type.element_type != value.element_type
-        elsif node.is_a?(Cast) && type.name == "VARCHAR" && relevant?(node.expression)
+        elsif node.is_a?(Cast) && type.name == "VARCHAR"
           cast = type.precision != CharacterString.sort_key(value.to_s).bytesize / 2
         elsif node.is_a?(Cast) && %w[BINARY VARBINARY].include?(type.name) && @evaluator.type_of(node.expression).name == "JSON"
           cast = value.nil? || type.name == "BINARY" || type.precision != value.bytesize
+        end
+        if node.is_a?(Cast) && !value.nil?
+          if type.name == "NUMERIC"
+            literal = NumericOperations.literal(value, type)
+            return literal if literal.precision == type.precision && literal.scale == type.scale && !type.declared_name
+
+            cast = true
+          elsif %w[REAL DOUBLE].include?(type.name)
+            type = Type.new(type.name, type.name == "REAL" ? 24 : 53, nil)
+          end
         end
         if !node.is_a?(Cast) && Temporal.value?(value)
           type = Temporal.type(Temporal.name(value), 9)
@@ -174,8 +188,9 @@ module H2
         return true if node.is_a?(Literal) && (node.value.is_a?(JsonValue) || node.value.is_a?(DecfloatValue))
         return true if [JsonFormat, JsonPredicate, TypePredicate, JsonConstructor].any? { node.is_a?(it) }
         return true if node.is_a?(Cast) && node.type.name == "JSON"
-        return true if node.is_a?(Cast) && node.type.name == "DECFLOAT"
+        return true if node.is_a?(Cast) && (%w[NUMERIC REAL DOUBLE BOOLEAN DECFLOAT] + Type::INTEGER_LIMITS.keys).include?(node.type.name)
         return true if node.is_a?(Cast) && node.type.name == "CHAR"
+        return true if node.is_a?(Cast) && node.type.name == "VARCHAR"
         return true if node.is_a?(Cast) && node.type.name == "NULL"
         return true if node.is_a?(Function) && ArrayFunctions::ARITIES.key?(node.name)
         return true if node.is_a?(ArrayConstructor) || node.is_a?(ArrayElement)

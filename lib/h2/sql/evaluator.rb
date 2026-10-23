@@ -617,7 +617,7 @@ module H2
               value = evaluate(expression)
               literal = MathFunctions.literal(value, type)
               actual = type_of(literal)
-              expression = [type.precision,type.scale] == [actual.precision,actual.scale] ? literal : TypedLiteral.new(value,type,true)
+              expression = [type.precision,type.scale] == [actual.precision,actual.scale] && !type.declared_name ? literal : TypedLiteral.new(value,type,true)
             elsif expression.is_a?(Cast) && expression.type.name == "TIMESTAMP"
               expression = TypedLiteral.new(evaluate(expression), expression.type, true)
             end

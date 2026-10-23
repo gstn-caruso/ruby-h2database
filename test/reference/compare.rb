@@ -27,7 +27,7 @@ normalize = lambda do |value, type|
 
   if %w[BINARY VARBINARY].include?(type)
     value.unpack1("H*")
-  elsif %w[TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE].include?(type)
+  elsif %w[TINYINT SMALLINT INTEGER BIGINT NUMERIC DECIMAL REAL DOUBLE].include?(type)
     text = type == "REAL" && value.is_a?(Float) ? H2::JsonValue.float_text(value, real: true) : value.to_s
     BigDecimal(text).to_s("F")
   elsif value == true || value == false
@@ -63,7 +63,7 @@ H2.connect do |connection|
     actual = begin
       result = connection.execute(sql)
       if result.query?
-        types = result.types.map { normalize_type.call(it.name) }
+        types = result.types.map { normalize_type.call(it.respond_to?(:type_name) ? it.type_name : it.name) }
         rows = result.rows.map { |row| row.each_with_index.map { |value, column| normalize.call(value, types[column]) } }
         rows = rows.sort_by { JSON.generate(it) } unless sql.match?(/\bORDER\s+BY\b/i)
         {columns: result.columns, types: types, rows: rows}

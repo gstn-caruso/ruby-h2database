@@ -284,7 +284,7 @@ module H2
           when nil then "NULL"
           when true then "TRUE"
           when false then "FALSE"
-          when String then BinaryString.binary?(node.value) ? "X'#{node.value.unpack1('H*')}'" : "'#{node.value.gsub("'", "''")}'"
+          when String then BinaryString.binary?(node.value) ? "X'#{node.value.unpack1('H*')}'" : CharacterString.sql(node.value)
           when UUIDValue then "UUID '#{node.value}'"
           when JsonValue then node.value.sql
           when DecfloatValue then node.value.special ? "'#{node.value}'" : node.value.to_s

@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 module H2
-  class Type < Data.define(:name, :precision, :scale, :declared_scale)
-    def initialize(name:, precision:, scale:, declared_scale: nil)
+  class Type < Data.define(:name, :precision, :scale, :declared_scale, :declared_name, :declared_precision)
+    def initialize(name:, precision:, scale:, declared_scale: nil, declared_name: nil, declared_precision: nil)
       super
     end
 
@@ -12,6 +12,8 @@ module H2
       "BIGINT" => (-9_223_372_036_854_775_808..9_223_372_036_854_775_807)}.freeze
     NUMERIC_WIDTHS = {"BOOLEAN" => [1, 0], "TINYINT" => [3, 0], "SMALLINT" => [5, 0], "INTEGER" => [10, 0],
       "BIGINT" => [19, 0], "REAL" => [85, 46], "DOUBLE" => [634, 325]}.freeze
+
+    def type_name = declared_name == "DECIMAL" ? "DECIMAL" : name
 
     def self.numeric_info(type)
       type.name == "NUMERIC" ? [type.precision || 100_000, type.scale || 0] : NUMERIC_WIDTHS.fetch(type.name, [100_000, 50_000])
@@ -75,6 +77,7 @@ module H2
       return new("UNKNOWN", nil, nil) if known.empty?
 
       types = known
+      return types.first if types.length == 1
       if types.any? { it.is_a?(RowType) }
         width = types.find { it.is_a?(RowType) }.fields.length
         types = types.map { it.is_a?(RowType) ? it : RowType.new([it]) } if width == 1
@@ -140,7 +143,8 @@ module H2
         text = case value
         when true then "TRUE"
         when false then "FALSE"
-        when BigDecimal then value.to_s("F")
+        when BigDecimal then ArrayType.decimal_text(value, source_type&.scale || [value.scale, 0].max)
+        when Float then JsonValue.float_text(value, real: source_type&.name == "REAL")
         else BinaryString.text(value)
         end
         CharacterString.fit(text, precision, pad: name == "CHAR", cast: cast)
@@ -163,7 +167,8 @@ module H2
       when *Intervals::NAMES
         Intervals.convert(value, Intervals.qualifier(self)).round(self)
       when "NUMERIC"
-        decimal = BigDecimal(numeric_input(value).to_s)
+        input = decimal_input(value, source_type)
+        decimal = input.is_a?(String) ? NumericText.decimal(input) : BigDecimal(input.to_s)
         raise Error.new(22018, "Non-finite NUMERIC value") unless decimal.finite?
 
         decimal = decimal.round(scale || 0, BigDecimal::ROUND_HALF_UP)
@@ -172,7 +177,8 @@ module H2
         end
         decimal
       when "REAL"
-        number = [floating(value)].pack("f").unpack1("f")
+        input = numeric_input(value)
+        number = input.is_a?(String) ? NumericText.floating(input, real: true) : NumericText.real_value(input)
         number.zero? ? 0.0 : number
       when "DOUBLE"
         number = floating(value)
@@ -201,7 +207,8 @@ module H2
       when *Intervals::NAMES
         Intervals.convert(value, Intervals.qualifier(self))
       when "NUMERIC"
-        number = BigDecimal(numeric_input(value).to_s)
+        input = decimal_input(value, source_type)
+        number = input.is_a?(String) ? NumericText.decimal(input) : BigDecimal(input.to_s)
         raise Error.new(22018, "Non-finite NUMERIC value") unless number.finite?
 
         number
@@ -213,14 +220,15 @@ module H2
 
     private
 
+    def decimal_input(value, source_type)
+      return JsonValue.float_text(value, real: source_type&.name == "REAL") if value.is_a?(Float)
+
+      numeric_input(value)
+    end
+
     def floating(value)
       value = numeric_input(value)
-      if value.is_a?(String)
-        value = value.encode(Encoding::UTF_8).sub(/\A[\x00-\x20]+/, '').sub(/[\x00-\x20]+\z/, '')
-        special = {"NaN" => Float::NAN, "+NaN" => Float::NAN, "-NaN" => Float::NAN,
-          "Infinity" => Float::INFINITY, "+Infinity" => Float::INFINITY, "-Infinity" => -Float::INFINITY}[value]
-        return special if special
-      end
+      return NumericText.floating(value) if value.is_a?(String)
       Float(value)
     rescue EncodingError
       raise Error.new(22018, "Invalid floating-point text encoding")
@@ -239,6 +247,9 @@ module H2
     end
 
     def integer(value)
+      if value.is_a?(DecfloatValue) && !value.finite?
+        raise Error.new(22018, "Cannot convert non-finite DECFLOAT to integer")
+      end
       value = value.to_d if value.is_a?(DecfloatValue)
       if BinaryString.binary?(value)
         format = BinaryString::INTEGER_PACK.fetch(name)
@@ -255,10 +266,14 @@ module H2
           raise Error.new(22003, "Floating point value is outside BIGINT range")
         end
         value.nan? ? 0 : [[(value.to_r + Rational(1,2)).floor, INTEGER_LIMITS.fetch("BIGINT").begin].max, INTEGER_LIMITS.fetch("BIGINT").end].min
-      when Numeric then value.round(0, half: :up).to_i
+      when Numeric
+        unless INTEGER_LIMITS.fetch("BIGINT").cover?(value)
+          raise Error.new(22003, "Decimal value is outside BIGINT range")
+        end
+        value.round(0, half: :up).to_i
       when true then 1
       when false then 0
-      else Integer(value.to_s.strip, 10)
+      else NumericText.integer(value.to_s, INTEGER_LIMITS.fetch(name))
       end
       raise Error.new(22003, "#{number} is outside #{name} range") unless INTEGER_LIMITS.fetch(name).cover?(number)
 
@@ -273,13 +288,13 @@ module H2
       end
       case value
       when true, false then value
-      when Numeric then !value.zero?
+      when Numeric then !value.zero? && !(value.respond_to?(:nan?) && value.nan?)
       else
-        text = value.to_s.strip
+        text = NumericText.trim(value.to_s)
         return true if text.match?(/\A(?:true|t|yes|y)\z/i)
         return false if text.match?(/\A(?:false|f|no|n)\z/i)
 
-        number = BigDecimal(text)
+        number = NumericText.decimal(text)
         raise Error.new(22018, "Cannot convert #{value.inspect} to BOOLEAN") unless number.finite?
 
         !number.zero?

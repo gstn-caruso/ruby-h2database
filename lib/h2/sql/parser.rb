@@ -249,7 +249,26 @@ module H2
 
       def base_type
         name = take.value
+        if name == "NUMBER"
+          return Type.new("DECFLOAT", 40, 0) unless current.value == "("
+
+          name = "NUMERIC"
+        end
+        if name == "FLOAT"
+          declared_precision = nil
+          if accept("(")
+            declared_precision = numeric_type_integer("INTEGER")
+            raise Error.new(90008, "Negative FLOAT precision") if declared_precision.negative?
+            raise Error.new(42001, "Expected FLOAT closing parenthesis") unless accept(")")
+            raise Error.new(90150, "Invalid FLOAT precision") unless (1..53).cover?(declared_precision)
+          end
+          real = declared_precision && declared_precision <= 24
+          return Type.new(name: real ? "REAL" : "DOUBLE", precision: real ? 24 : 53, scale: nil,
+            declared_name: "FLOAT", declared_precision: declared_precision)
+        end
+        declared_name = "DECIMAL" if %w[DEC DECIMAL].include?(name)
         name = TYPE_NAMES.fetch(name, name)
+        return numeric_type(declared_name) if name == "NUMERIC"
         return Type.new("NULL", nil, nil) if name == "NULL"
         if name == "DECFLOAT"
           precision = 100_000
@@ -284,21 +303,49 @@ module H2
         unless %w[TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE BOOLEAN VARCHAR CHAR BINARY VARBINARY UUID].include?(name)
           raise Error.new(50100, "Type #{name.inspect} not yet ported")
         end
-        precision = name == "NUMERIC" ? 100_000 : (%w[CHAR BINARY].include?(name) ? 1 : nil)
-        scale = name == "NUMERIC" ? 0 : nil
-        declared_scale = nil
+        precision = %w[CHAR BINARY].include?(name) ? 1 : nil
         if accept("(")
           precision = positive_integer
-          if name == "NUMERIC" && accept(",")
-            scale = declared_scale = positive_integer(allow_zero: true)
-          end
           expect(")")
-          raise Error.new(50100, "Precision for #{name} not supported") unless %w[NUMERIC VARCHAR CHAR BINARY VARBINARY].include?(name)
+          raise Error.new(50100, "Precision for #{name} not supported") unless %w[VARCHAR CHAR BINARY VARBINARY].include?(name)
           if %w[BINARY VARBINARY].include?(name) && precision > 1_000_000_000
             raise Error.new(90150, "Invalid binary precision")
           end
         end
-        Type.new(name, precision, scale, declared_scale)
+        Type.new(name, precision, nil)
+      end
+
+      def numeric_type(declared_name)
+        precision, scale, declared_precision, declared_scale = 100_000, 0, nil, nil
+        if accept("(")
+          precision = declared_precision = numeric_type_integer("BIGINT")
+          raise Error.new(90008, "Invalid numeric precision") if precision <= 0
+          raise Error.new(90150, "Invalid numeric precision") if precision > 100_000
+          if accept(",")
+            scale = declared_scale = numeric_type_integer("INTEGER")
+            raise Error.new(90151, "Invalid numeric scale") unless (0..100_000).cover?(scale)
+          end
+          expect(")")
+        end
+        Type.new(name: "NUMERIC", precision: precision, scale: scale, declared_scale: declared_scale,
+          declared_name: declared_name, declared_precision: declared_precision)
+      end
+
+      def numeric_type_integer(name)
+        minus = accept("-")
+        accept("+") unless minus
+        token = take
+        raise Error.new(42001, "Expected numeric type integer") unless token.kind == :literal
+
+        value = token.value
+        value = value.value if value.is_a?(DecimalLiteral) || value.is_a?(TypedLiteral)
+        if minus
+          value = if value.is_a?(DecfloatValue) then value.negate
+          elsif value.is_a?(Numeric) then -value
+          else raise Error.new(50100, "Cannot negate numeric type argument")
+          end
+        end
+        Type.new(name, nil, nil).convert(value)
       end
 
       def positive_integer(allow_zero: false)

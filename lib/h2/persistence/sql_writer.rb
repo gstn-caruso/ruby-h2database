@@ -41,9 +41,7 @@ module H2
         case value.name
         when *(Temporal::NAMES - ["DATE"])
           value.name.sub(/\A(TIMESTAMP|TIME)/) { "#{it}(#{value.scale || (Temporal.time_type?(value.name) ? 0 : 6)})" }
-        when "NUMERIC" then "NUMERIC(#{value.precision || 100_000},#{value.scale || 0})"
-        when "JSON" then SQLTypeName.format(value)
-        when "DECFLOAT" then SQLTypeName.format(value)
+        when "NUMERIC", "REAL", "DOUBLE", "JSON", "DECFLOAT" then SQLTypeName.format(value)
         when "VARCHAR", "CHAR", "BINARY", "VARBINARY" then value.precision ? "#{value.name}(#{value.precision})" : value.name
         else value.name
         end

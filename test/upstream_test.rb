@@ -168,6 +168,16 @@ class UpstreamTest < DatabaseTest
     end
   end
 
+  def test_original_numeric_declarations_limits_and_assignment_rounding
+    script = UpstreamScript.new(File.join(ROOT,"datatypes/numeric.sql"))
+    [3,*(9..14),*(20..28),*(30..32)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_real_and_integer_comparison
+    script = UpstreamScript.new(File.join(ROOT,"datatypes/real.sql"))
+    (7..9).each { check_case(script.cases.fetch(it)) }
+  end
+
   def test_original_round_except_call_and_information_schema
     script = UpstreamScript.new(File.join(ROOT,"functions/numeric/round.sql"))
     [*(0..2),5,6,*(16..18),*(20..28)].each { check_case(script.cases.fetch(it)) }
