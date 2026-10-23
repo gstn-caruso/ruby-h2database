@@ -37,6 +37,16 @@ class SQLStorageTest < Minitest::Test
     end
   end
 
+  def test_enum_tags_survive_decoding_and_page_reencoding
+    %w[1910 1914].each do |hex|
+      value = decode(hex)
+      assert_equal :enum, value.type
+      output = M::Buffer.new
+      M::Codecs::VALUE.write(output, value)
+      assert_equal hex, output.data.unpack1('H*')
+    end
+  end
+
   def test_decimal_scale_and_integer_type_identity_are_preserved
     value = M::Value.new(:numeric, M::Decimal.new(1200, 3))
     assert_equal BigDecimal("1.200"), value.to_ruby

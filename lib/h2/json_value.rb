@@ -30,7 +30,7 @@ module H2
         return parse(value) if BinaryString.binary?(value)
         JsonDocument.quote(value)
         JsonDocument::Node.new(:string, value.encode(Encoding::UTF_8).freeze)
-      when UUIDValue, DateValue, TimeValue, TimeTimeZoneValue
+      when EnumValue, UUIDValue, DateValue, TimeValue, TimeTimeZoneValue
         JsonDocument::Node.new(:string, value.to_s.freeze)
       when TimestampValue, TimestampTimeZoneValue
         JsonDocument::Node.new(:string, value.to_s.sub(' ', 'T').freeze)

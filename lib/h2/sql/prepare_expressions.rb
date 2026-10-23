@@ -193,6 +193,7 @@ module H2
       end
 
       def relevant?(node)
+        return true if node.is_a?(Cast) && node.type.name == "ENUM"
         return true if node.is_a?(Function) && BitFunctions::ARITIES.key?(node.name)
         return true if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name)
         return true if node.is_a?(Function) && node.name == "SIGN"

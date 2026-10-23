@@ -19,7 +19,8 @@ module H2
         expanded.end_with?(".mv.db") ? expanded : "#{expanded}.mv.db"
       end
 
-      def initialize(path, user:, password:, read_only:, compression:)
+      def initialize(path, user:, password:, read_only:, compression:, zero_based_enums: false)
+        @context = SessionContext.new(zero_based_enums: zero_based_enums)
         @path = self.class.file_name(path)
         @store = MVStore::Store.open(@path, read_only: read_only, compression: compression)
         @transactions = MVStore::TransactionStore.new(@store, recover: false)
@@ -228,7 +229,7 @@ module H2
               unless row.is_a?(MVStore::SearchRow) && row.values.length == columns.length
                 raise Error.new(90030, "Stored table row has the wrong width")
               end
-              values = columns.each_with_index.to_h { |column, index| [column.name, ValueAdapter.decode(row.values[index], column.type)] }
+              values = columns.each_with_index.to_h { |column, index| [column.name, ValueAdapter.decode(row.values[index], column.type, context: @context)] }
               result = table.convert_row(values)
               table.rows << result
               table.assign_row_id(result, id)

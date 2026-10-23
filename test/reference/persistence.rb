@@ -268,6 +268,20 @@ changes.concat(['UPDATE bit_source SET s=7,i=1 WHERE j=6','INSERT INTO bit_saved
   "INSERT INTO bit_keys SELECT BITXOR(b,X'ff') FROM bit_source WHERE j=6",'INSERT INTO bit_copy SELECT BITAND(i,j),BITNOT(b),BITCOUNT(b) FROM bit_source',
   "UPDATE bit_source SET b=X'0102' WHERE j=6",'INSERT INTO bit_saved DEFAULT VALUES'])
 
+enum_labels = (1..20).map { "'e#{it}'" }.join(',')
+schema.concat([
+  "CREATE TABLE enum_source(e ENUM(#{enum_labels}) PRIMARY KEY,a ENUM('z','a') ARRAY)",
+  "INSERT INTO enum_source VALUES(1,ARRAY['z','a']),(15,NULL),(16,ARRAY['a']),(20,ARRAY[])",
+  "CREATE TABLE enum_saved(e ENUM(#{enum_labels}) DEFAULT (SELECT MIN(e) FROM enum_source),a ENUM('z','a') ARRAY DEFAULT ARRAY[CAST('a' AS ENUM('z','a'))])",
+  'INSERT INTO enum_saved DEFAULT VALUES',
+  "CREATE TABLE enum_ctas AS SELECT e,CAST(e AS INT) AS n,ROW(e,a) AS r FROM enum_source",
+  "CREATE TABLE enum_empty AS SELECT CAST(NULL AS ENUM('empty','other')) AS e"
+])
+queries.concat(['TABLE enum_source ORDER BY e','TABLE enum_saved ORDER BY e','TABLE enum_ctas ORDER BY e','TABLE enum_empty',
+  'SELECT MIN(e) AS lo,MAX(e) AS hi,COUNT(DISTINCT e) AS n FROM enum_source'])
+changes.concat(["INSERT INTO enum_source(e) VALUES(' E16 ')","DELETE FROM enum_source WHERE e='e1'",'INSERT INTO enum_saved DEFAULT VALUES',
+  "INSERT INTO enum_source VALUES('e2',ARRAY['A'])",'INSERT INTO enum_ctas SELECT e,CAST(e AS INT),ROW(e,a) FROM enum_source'])
+
 intervals = [
   ["YEAR", "1"], ["MONTH", "2"], ["DAY", "3"], ["HOUR", "4"], ["MINUTE", "5"], ["SECOND", "6.123456789"],
   ["YEAR TO MONTH", "1-2"], ["DAY TO HOUR", "1 2"], ["DAY TO MINUTE", "1 2:3"], ["DAY TO SECOND", "1 2:3:4.123456789"],

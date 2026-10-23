@@ -5,6 +5,22 @@ module H2
     module NumericOperations
       module_function
 
+      def ordinal_arithmetic(operator, read)
+        type = Type.new("INTEGER", 32, 0)
+        left = type.convert(read.call(0))
+        right = type.convert(read.call(1))
+        return nil if left.nil? || right.nil?
+        raise Error.new(22012, "Division by zero") if operator == "/" && right.zero?
+
+        result = case operator
+        when "+" then left + right
+        when "-" then left - right
+        when "*" then left * right
+        when "/" then (left.negative? ^ right.negative? ? -1 : 1) * (left.abs / right.abs)
+        end
+        type.convert(result)
+      end
+
       def type(operator, left, right)
         if Type.common([left, right]).name == "DECFLOAT"
           precisions = [left, right].map { Type.decfloat_precision(it) }

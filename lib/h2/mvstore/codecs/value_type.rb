@@ -10,10 +10,10 @@ module H2
         include Type
         TAGS = {null: 0, tinyint: 2, smallint: 3, integer: 4, bigint: 5, numeric: 6, double: 7, real: 8,
           time: 9, date: 10, timestamp: 11, varbinary: 12, varchar: 13, varchar_ignorecase: 14, blob: 15,
-          clob: 16, array: 17, java_object: 19, uuid: 20, char: 21, geometry: 22, interval: 26, row: 27,
+          clob: 16, array: 17, java_object: 19, uuid: 20, char: 21, geometry: 22, enum: 25, interval: 26, row: 27,
           json: 134, timestamp_tz: 135, time_tz: 136, binary: 137, decfloat: 138}.freeze
         BINARY_TAGS = [12, 19, 22, 134, 137].freeze
-        NUMERIC_TYPES = [:tinyint, :smallint, :integer, :bigint, :numeric, :decfloat, :real, :double].freeze
+        NUMERIC_TYPES = [:tinyint, :smallint, :integer, :bigint, :enum, :numeric, :decfloat, :real, :double].freeze
 
         def copy(value)
           raise ArgumentError, "Expected H2::MVStore::Value" unless value.is_a?(Value)
@@ -76,6 +76,8 @@ module H2
           when :tinyint then buffer.put_byte(2).put_byte(data & 255)
           when :smallint then buffer.put_byte(3).write([data].pack("s>"))
           when :integer, :bigint then write_integer(buffer, data, type == :integer ? 32 : 64)
+          when :enum
+            data >= 16 ? DataUtils.write_var_int(buffer.put_byte(25), data) : write_integer(buffer, data, 32)
           when :numeric, :decfloat then write_decimal(buffer, type, data)
           when :real, :double then write_float(buffer, type, data)
           when :varchar
@@ -157,7 +159,6 @@ module H2
             type = :timestamp_tz
             [DataUtils.read_var_long(buffer), read_time(buffer), DataUtils.read_var_int(buffer) * 60]
           when 25
-            type = :integer
             DataUtils.read_var_int(buffer)
           when 26
             ordinal = signed(buffer.byte, 8)

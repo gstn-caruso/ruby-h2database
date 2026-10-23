@@ -6,6 +6,7 @@ module H2
     module_function
 
     def format(type)
+      return type.sql if type.is_a?(EnumType)
       if type.is_a?(RowType)
         return "ROW(#{type.fields.each_with_index.map { |field, index| "\"C#{index + 1}\" #{format(field)}" }.join(', ')})"
       end

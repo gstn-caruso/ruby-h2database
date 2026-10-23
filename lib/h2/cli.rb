@@ -12,6 +12,7 @@ module H2
         command.on("-e", "--execute SQL", "Execute SQL") { options[:sql] = it }
         command.on("-d", "--database PATH", "Open a persistent SQL database") { options[:path] = it }
         command.on("--read-only", "Open the database read-only") { options[:read_only] = true }
+        command.on("--zero-based-enums", "Use ENUM ordinals starting at zero") { options[:zero_based_enums] = true }
         command.on("--user NAME", "Database user (default: sa)") { options[:user] = it }
         command.on("--password PASSWORD", "Database password") { options[:password] = it }
         command.on("-v", "--version", "Print version") { options[:version] = true }
@@ -26,7 +27,7 @@ module H2
         raise OptionParser::InvalidArgument, "provide either --execute or one SQL file"
       end
       sql = options[:sql] || (remaining.empty? ? input.read : File.read(remaining.first))
-      database_options = options.select { |key, _value| [:path, :read_only, :user, :password].include?(key) }
+      database_options = options.select { |key, _value| [:path, :read_only, :user, :password, :zero_based_enums].include?(key) }
       H2.connect(**database_options) do |connection|
         connection.execute_script(sql).each { render(it, output) }
       end

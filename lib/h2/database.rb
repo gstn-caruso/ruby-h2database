@@ -2,6 +2,7 @@
 
 module H2
   class Database
+    attr_reader :zero_based_enums
     def self.open(path, **options)
       database = new(path: path, **options)
       return database unless block_given?
@@ -13,13 +14,15 @@ module H2
       end
     end
 
-    def initialize(path: nil, user: "sa", password: "", read_only: false, compression: :none)
+    def initialize(path: nil, user: "sa", password: "", read_only: false, compression: :none, zero_based_enums: false)
+      raise ArgumentError, "zero_based_enums must be boolean" unless [true,false].include?(zero_based_enums)
+      @zero_based_enums = zero_based_enums
       @mutex = Mutex.new
       @closed = false
       @read_only = read_only
       if path
         require_relative "persistence/catalog"
-        @storage = Persistence::Catalog.new(path, user: user, password: password, read_only: read_only, compression: compression)
+        @storage = Persistence::Catalog.new(path, user: user, password: password, read_only: read_only, compression: compression, zero_based_enums: zero_based_enums)
       end
       @tables = @storage ? @storage.tables : {}.freeze
     end

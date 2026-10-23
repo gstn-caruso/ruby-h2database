@@ -48,6 +48,7 @@ module H2
     end
 
     def self.convert(value, source_type: nil)
+      value = value.ordinal if value.is_a?(EnumValue)
       return value if value.is_a?(self)
       text = case value
       when BigDecimal then ArrayType.decimal_text(value, source_type&.scale || [value.scale, 0].max)

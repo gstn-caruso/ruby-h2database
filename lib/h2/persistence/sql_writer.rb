@@ -31,6 +31,7 @@ module H2
       end
 
       def type(value)
+        return value.sql if value.is_a?(EnumType)
         if value.is_a?(ArrayType)
           return "#{type(value.element_type)} ARRAY#{value.precision == ArrayValue::MAX_CARDINALITY ? '' : "[#{value.precision}]"}"
         end
@@ -48,6 +49,7 @@ module H2
       end
 
       def literal(value, type: nil)
+        return "CAST(#{literal(value.label)} AS #{self.type(value.type)})" if value.is_a?(EnumValue)
         case value
         when nil then "NULL"
         when true then "TRUE"

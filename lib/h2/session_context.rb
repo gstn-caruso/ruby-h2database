@@ -2,9 +2,10 @@
 
 module H2
   class SessionContext
-    attr_reader :zone, :zone_generation
+    attr_reader :zone, :zone_generation, :zero_based_enums
 
-    def initialize
+    def initialize(zero_based_enums: false)
+      @zero_based_enums = zero_based_enums
       @zone = TimeZone.default
       @zone_generation = 0
     end
