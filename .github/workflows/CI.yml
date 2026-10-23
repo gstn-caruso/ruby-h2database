@@ -1,6 +1,15 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    paths:
+      - 'h2/**'
+      - '.github/workflows/CI.yml'
+  pull_request:
+    paths:
+      - 'h2/**'
+      - '.github/workflows/CI.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read #  to fetch code (actions/checkout)

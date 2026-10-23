@@ -2,14 +2,31 @@
 
 module H2
   class Type < Data.define(:name, :precision, :scale)
+    ORDER = %w[NULL CHAR VARCHAR BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE].freeze
     INTEGER_LIMITS = {"TINYINT" => (-128..127), "SMALLINT" => (-32_768..32_767),
       "INTEGER" => (-2_147_483_648..2_147_483_647),
       "BIGINT" => (-9_223_372_036_854_775_808..9_223_372_036_854_775_807)}.freeze
+
+    def self.common(types)
+      types = types.compact.reject { it.name == "NULL" }
+      return new("NULL", nil, nil) if types.empty?
+
+      name = types.max_by { ORDER.index(it.name) || -1 }.name
+      precision = types.any? { it.precision.nil? } ? nil : types.map(&:precision).max
+      scale = types.filter_map(&:scale).max
+      if name == "NUMERIC"
+        precision = 100_000
+        scale ||= 0
+      end
+      new(name, precision, scale)
+    end
 
     def convert(value, cast: false)
       return nil if value.nil?
 
       case name
+      when "NULL"
+        raise Error.new(22018, "Cannot assign a non-NULL value to NULL type")
       when *INTEGER_LIMITS.keys
         integer(value)
       when "VARCHAR", "CHAR"

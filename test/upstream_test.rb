@@ -26,6 +26,17 @@ class UpstreamTest < DatabaseTest
     script.cases.first(3).each { check_case(it) }
   end
 
+  def test_original_join_first_seven_statements
+    script = UpstreamScript.new(File.join(ROOT, "queries/joins.sql"))
+    script.cases.first(7).each { check_case(it) }
+  end
+
+  def test_original_range_large_count_and_noncorrelated_queries
+    script = UpstreamScript.new(File.join(ROOT, "range_table.sql"))
+    check_case(script.cases.fetch(6))
+    script.cases[8..39].each { check_case(it) }
+  end
+
   private
 
   def check_case(scenario)
