@@ -50,7 +50,7 @@ class SQLTest < DatabaseTest
 
   def test_single_statement_api_rejects_trailing_statements_before_mutation
     assert_sql_error 42000, "CREATE TABLE t(a INT); DROP TABLE t"
-    assert_sql_error 42102, "TABLE t"
+    assert_sql_error 42104, "TABLE t"
   end
 
   def test_create_insert_project_filter_and_order
@@ -145,7 +145,7 @@ class SQLTest < DatabaseTest
     assert_empty rows("TABLE t")
     execute("DROP TABLE t")
     execute("DROP TABLE IF EXISTS t")
-    assert_sql_error 42102, "TABLE t"
+    assert_sql_error 42104, "TABLE t"
   end
 
   def test_create_if_not_exists_and_duplicate_names

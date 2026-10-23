@@ -281,12 +281,12 @@ module H2
       end
 
       def query_start?
-        return true if %w[SELECT TABLE VALUES].any? { keyword?(it) }
+        return true if %w[SELECT TABLE VALUES WITH].any? { keyword?(it) }
         return false unless keyword?("(")
 
         start = @position
         start += 1 while @tokens[start]&.kind == :symbol && @tokens[start].value == "("
-        return false unless @tokens[start]&.kind == :word && %w[SELECT TABLE VALUES].include?(@tokens[start].value)
+        return false unless @tokens[start]&.kind == :word && %w[SELECT TABLE VALUES WITH].include?(@tokens[start].value)
 
         depth = 0
         @tokens[@position..].each_with_index do |token, index|
@@ -302,6 +302,38 @@ module H2
       end
 
       def query
+        return with_query if accept("WITH")
+
+        query_body
+      end
+
+      def with_query
+        old_recursive = @parsing_recursive_with
+        if old_recursive && keyword?("RECURSIVE")
+          raise Error.new(42001, "Nested RECURSIVE definition")
+        end
+        recursive = accept("RECURSIVE")
+        @parsing_recursive_with = old_recursive || recursive
+        begin
+          definitions = list do
+            name = identifier
+            if recursive && !keyword?("(")
+              raise Error.new(42001, "Recursive WITH requires column names")
+            end
+            columns = keyword?("(") ? parenthesized_identifiers : nil
+            expect("AS")
+            expect("(")
+            definition = query
+            expect(")")
+            CommonTableDefinition.new(name, columns&.freeze, definition)
+          end
+        ensure
+          @parsing_recursive_with = old_recursive
+        end
+        WithQuery.new(definitions.freeze, query_body, recursive)
+      end
+
+      def query_body
         statement = query_term
         loop do
           operator = if accept("UNION")
@@ -371,7 +403,7 @@ module H2
       end
 
       def table_query
-        source = TableSource.new(table_name)
+        source = source_name
         Select.new([Projection.new(Star.new(nil), nil)], source, nil, [], nil, false, [], nil, nil)
       end
 
@@ -425,13 +457,14 @@ module H2
           expect(")")
           nested
         else
-          name = table_name
+          reference = source_name
+          name = reference.name
           if accept("(")
             arguments = keyword?(")") ? [] : list { expression }
             expect(")")
             RangeSource.new(name, arguments)
           else
-            TableSource.new(name)
+            reference
           end
         end
         name = optional_alias
@@ -444,6 +477,15 @@ module H2
 
         columns = keyword?("(") ? parenthesized_identifiers : nil
         AliasedSource.new(source, name, columns)
+      end
+
+      def source_name
+        first = identifier
+        return TableSource.new(first, false) unless accept(".")
+
+        raise Error.new(90079, "Schema #{first} not found") unless first == "PUBLIC"
+
+        TableSource.new(identifier, true)
       end
 
       def value_rows

@@ -168,7 +168,7 @@ class RelationalQueryTest < DatabaseTest
     assert_sql_error 42102, "DROP TABLE people, absent"
     assert_equal [[4]], rows("SELECT COUNT(*) FROM people")
     execute("DROP TABLE people, departments")
-    assert_sql_error 42102, "TABLE people"
-    assert_sql_error 42102, "TABLE departments"
+    assert_sql_error 42104, "TABLE people"
+    assert_sql_error 42104, "TABLE departments"
   end
 end

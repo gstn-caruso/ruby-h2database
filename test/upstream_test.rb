@@ -57,6 +57,11 @@ class UpstreamTest < DatabaseTest
     [*(42..46), *(149..156)].each { check_case(script.cases.fetch(it)) }
   end
 
+  def test_original_common_table_queries_except_plans_schemas_views_and_delta_tables
+    script = UpstreamScript.new(File.join(ROOT, "dml/with.sql"))
+    [*(0..3), *(6..10), *(12..15), *(18..28), *(39..45), *(49..51)].each { check_case(script.cases.fetch(it)) }
+  end
+
   private
 
   def check_case(scenario)

@@ -64,10 +64,10 @@ module H2
         end
       end
 
-      def expression(node, parameters: [])
-        render = ->(child) { expression(child, parameters: parameters) }
+      def expression(node, parameters: [], ctes: [])
+        render = ->(child) { expression(child, parameters: parameters, ctes: ctes) }
         case node
-        when SQL::CapturedExpression then expression(node.expression, parameters: node.parameters)
+        when SQL::CapturedExpression then expression(node.expression, parameters: node.parameters, ctes: ctes)
         when SQL::Literal then literal(node.value)
         when SQL::Parameter then literal(parameters.fetch(node.index))
         when SQL::ColumnRef then [node.qualifier, node.name].compact.map { identifier(it) }.join(".")
@@ -77,9 +77,9 @@ module H2
         when SQL::Cast then "CAST(#{render.call(node.expression)} AS #{type(node.type)})"
         when SQL::Function then "#{node.name}(#{node.distinct ? 'DISTINCT ' : ''}#{node.arguments.map { render.call(it) }.join(', ')})"
         when SQL::RowConstructor then "ROW(#{node.expressions.map { render.call(it) }.join(', ')})"
-        when SQL::Subquery then "(#{query(node.query, parameters: parameters)})"
-        when SQL::Exists then "EXISTS(#{query(node.query, parameters: parameters)})"
-        when SQL::InQuery then "(#{render.call(node.expression)} IN(#{query(node.query, parameters: parameters)}))"
+        when SQL::Subquery then "(#{query(node.query, parameters: parameters, ctes: ctes)})"
+        when SQL::Exists then "EXISTS(#{query(node.query, parameters: parameters, ctes: ctes)})"
+        when SQL::InQuery then "(#{render.call(node.expression)} IN(#{query(node.query, parameters: parameters, ctes: ctes)}))"
         when SQL::CaseExpression
           sql = "CASE" + (node.operand ? " #{render.call(node.operand)}" : "")
           node.branches.each { |condition, value| sql += " WHEN #{render.call(condition)} THEN #{render.call(value)}" }
@@ -101,19 +101,21 @@ module H2
         end
       end
 
-      def query(node, parameters: [])
-        render = ->(child) { expression(child, parameters: parameters) }
+      def query(node, parameters: [], ctes: [])
+        return with_query(node, parameters: parameters, ctes: ctes) if node.is_a?(SQL::WithQuery)
+
+        render = ->(child) { expression(child, parameters: parameters, ctes: ctes) }
         sql = case node
         when SQL::SetQuery
           operator = {union: "UNION", union_all: "UNION ALL", except: "EXCEPT", intersect: "INTERSECT"}.fetch(node.operator)
-          "(#{query(node.left, parameters: parameters)}) #{operator} (#{query(node.right, parameters: parameters)})"
+          "(#{query(node.left, parameters: parameters, ctes: ctes)}) #{operator} (#{query(node.right, parameters: parameters, ctes: ctes)})"
         when SQL::Values
           "VALUES " + node.rows.map { |row| "(#{row.map { render.call(it) }.join(', ')})" }.join(", ")
         when SQL::Select
           text = "SELECT#{node.distinct ? ' DISTINCT' : ''} " + node.projections.map do |projection|
             render.call(projection.expression) + (projection.label ? " AS #{identifier(projection.label)}" : "")
           end.join(", ")
-          text += " FROM #{source(node.source, parameters: parameters)}" if node.source
+          text += " FROM #{source(node.source, parameters: parameters, ctes: ctes)}" if node.source
           text += " WHERE #{render.call(node.where)}" if node.where
           text += " GROUP BY #{node.group.map { render.call(it) }.join(', ')}" unless node.group.empty?
           text += " HAVING #{render.call(node.having)}" if node.having
@@ -132,20 +134,34 @@ module H2
         sql
       end
 
-      def source(node, parameters: [])
+      def with_query(node, parameters:, ctes:)
+        visible = ctes.dup
+        definitions = node.definitions.map do |definition|
+          scope = node.recursive ? visible + [definition.name] : visible
+          sql = identifier(definition.name)
+          sql += "(#{definition.columns.map { identifier(it) }.join(', ')})" if definition.columns
+          sql += " AS (#{query(definition.query, parameters: parameters, ctes: scope)})"
+          visible << definition.name
+          sql
+        end
+        "WITH#{node.recursive ? ' RECURSIVE' : ''} #{definitions.join(', ')} #{query(node.query, parameters: parameters, ctes: visible)}"
+      end
+
+      def source(node, parameters: [], ctes: [])
         case node
-        when SQL::TableSource then table_name(node.name)
-        when SQL::RangeSource then "#{node.name}(#{node.arguments.map { expression(it, parameters: parameters) }.join(', ')})"
-        when SQL::DerivedSource then "(#{query(node.query, parameters: parameters)})"
+        when SQL::TableSource
+          !node.qualified && ctes.include?(node.name) ? identifier(node.name) : table_name(node.name)
+        when SQL::RangeSource then "#{node.name}(#{node.arguments.map { expression(it, parameters: parameters, ctes: ctes) }.join(', ')})"
+        when SQL::DerivedSource then "(#{query(node.query, parameters: parameters, ctes: ctes)})"
         when SQL::AliasedSource
-          text = "#{source(node.source, parameters: parameters)} AS #{identifier(node.name)}"
+          text = "#{source(node.source, parameters: parameters, ctes: ctes)} AS #{identifier(node.name)}"
           text += "(#{node.columns.map { identifier(it) }.join(', ')})" if node.columns
           text
         when SQL::JoinSource
           operator = {inner: "INNER JOIN", left: "LEFT JOIN", right: "RIGHT JOIN", cross: "CROSS JOIN"}.fetch(node.kind)
           operator = "NATURAL #{operator}" if node.natural
-          text = "#{source(node.left, parameters: parameters)} #{operator} #{source(node.right, parameters: parameters)}"
-          text += " ON #{expression(node.condition, parameters: parameters)}" if node.condition
+          text = "#{source(node.left, parameters: parameters, ctes: ctes)} #{operator} #{source(node.right, parameters: parameters, ctes: ctes)}"
+          text += " ON #{expression(node.condition, parameters: parameters, ctes: ctes)}" if node.condition
           text += " USING(#{node.using_columns.map { identifier(it) }.join(', ')})" unless node.using_columns.empty?
           "(#{text})"
         else raise Error.new(50100, "Default source serialization has not been ported")

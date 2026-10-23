@@ -3,12 +3,31 @@
 module H2
   module SQL
     class Queries
-      def initialize(catalog, parameters)
+      def initialize(catalog, parameters, ctes: {})
+        @catalog, @ctes = catalog, ctes.freeze
         @parameters = parameters
         @sources = Sources.new(catalog, parameters, self)
       end
 
+      def with_cte(table)
+        self.class.new(@catalog, @parameters, ctes: @ctes.merge(table.name => table))
+      end
+
+      def cte(name)
+        @ctes[name]
+      end
+
+      def unbound
+        self.class.new(@catalog, Array.new(@parameters.length, UNBOUND_PARAMETER), ctes: @ctes)
+      end
+
+      def for_definition
+        self.class.new(@catalog, @parameters, ctes: @ctes.reject { |_name, table| table.preparing? })
+      end
+
       def prepare(statement, outer_scope: nil)
+        return WithPlan.new(statement, self, outer_scope) if statement.is_a?(WithQuery)
+
         klass = case statement
         when Select then SelectPlan
         when Values then ValuesPlan

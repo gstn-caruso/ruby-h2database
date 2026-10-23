@@ -14,8 +14,8 @@ module H2
         names = [left.name, right.name]
         binary = (names & %w[BINARY VARBINARY]).any?
         uuid = names.include?("UUID")
-        if (binary && (names - %w[NULL BINARY VARBINARY UUID]).any?) ||
-            (uuid && (names - %w[NULL CHAR VARCHAR BINARY VARBINARY UUID]).any?)
+        if (binary && (names - %w[NULL UNKNOWN BINARY VARBINARY UUID]).any?) ||
+            (uuid && (names - %w[NULL UNKNOWN CHAR VARCHAR BINARY VARBINARY UUID]).any?)
           raise Error.new(90110, "SQL types #{names.join(', ')} are not comparable")
         end
       end
@@ -25,6 +25,10 @@ module H2
     def self.common(types)
       types = types.compact.reject { it.name == "NULL" }
       return new("NULL", nil, nil) if types.empty?
+      known = types.reject { it.name == "UNKNOWN" }
+      return new("UNKNOWN", nil, nil) if known.empty?
+
+      types = known
       if types.any? { it.is_a?(RowType) }
         width = types.find { it.is_a?(RowType) }.fields.length
         types = types.map { it.is_a?(RowType) ? it : RowType.new([it]) } if width == 1

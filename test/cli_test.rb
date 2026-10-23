@@ -54,7 +54,7 @@ class CLITest < Minitest::Test
     output, error, status = Open3.capture3(RbConfig.ruby, "-Ilib", "exe/h2", "--execute", "TABLE missing;")
     refute status.success?
     assert_empty output
-    assert_includes error, "[42102]"
+    assert_includes error, "[42104]"
   end
 
   def test_escapes_control_characters_and_backslashes

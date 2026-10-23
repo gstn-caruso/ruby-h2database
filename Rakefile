@@ -12,6 +12,7 @@ namespace :test do
     Dir["test/fixtures/*_reference.sql"].sort.each { ruby "test/reference/compare.rb", it }
     ruby "test/reference/binary_values.rb"
     ruby "test/reference/set_queries.rb"
+    ruby "test/reference/common_tables.rb"
     ruby "test/reference/mvstore.rb"
     ruby "test/reference/sql_storage.rb"
     ruby "test/reference/transactions.rb"

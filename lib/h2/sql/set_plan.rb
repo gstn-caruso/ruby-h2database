@@ -43,6 +43,10 @@ module H2
         super && @left.constant? && @right.constant?
       end
 
+      def recursive_parts
+        [@left, @right]
+      end
+
       private
 
       def convert_rows(rows, source_types)

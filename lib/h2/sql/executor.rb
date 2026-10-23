@@ -14,10 +14,10 @@ module H2
 
       def execute(statement)
         case statement
-        when Select, Values, SetQuery, Explain then @queries.execute(statement)
+        when Select, Values, SetQuery, WithQuery, Explain then @queries.execute(statement)
         when CreateTable then create(statement)
         when DropTable
-          statement.names.each { table(it) } unless statement.if_exists
+          statement.names.each { table(it, drop: true) } unless statement.if_exists
           validate_drop_dependencies(statement.names)
           statement.names.each { @changes[it] = nil }
           Result.new(update_count: 0)
@@ -35,8 +35,8 @@ module H2
 
       private
 
-      def table(name)
-        @catalog.fetch(name) { raise Error.new(42102, "Table #{name} not found") }
+      def table(name, drop: false)
+        @catalog.fetch(name) { raise Error.new(!drop && @catalog.empty? ? 42104 : 42102, "Table #{name} not found") }
       end
 
       def validate_drop_dependencies(names)
@@ -50,7 +50,7 @@ module H2
             evaluator = Evaluator.new(parameters, queries: Queries.new(remaining, parameters))
             evaluator.validate(expression)
           rescue Error => error
-            raise unless error.code == 42102
+            raise unless [42102, 42104].include?(error.code)
 
             raise Error.new(90107, "Cannot drop table because #{table.name} depends on it")
           end
