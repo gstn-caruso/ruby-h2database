@@ -41,7 +41,7 @@ module H2
       def count_only?(statement, projections)
         !statement.where && statement.group.empty? && !statement.having && projections.all? do |projection|
           node = projection.expression
-          node.is_a?(Function) && node.name == "COUNT" && node.arguments.first.is_a?(Star)
+          node.is_a?(Aggregate) && node.name == "COUNT" && node.arguments.first.is_a?(Star) && !node.filter
         end
       end
 
@@ -104,18 +104,7 @@ module H2
           [entry, keys, index]
         end
         keyed.sort! do |left, right|
-          comparison = 0
-          order.each_with_index do |ordering, index|
-            a, b = left[1][index], right[1][index]
-            if a.nil? || b.nil?
-              nulls_first = ordering.nulls ? ordering.nulls == :first : !ordering.descending
-              comparison = a.nil? && b.nil? ? 0 : (a.nil? == nulls_first ? -1 : 1)
-            else
-              comparison = evaluator.compare(a, b)
-              comparison = -comparison if ordering.descending
-            end
-            break unless comparison.zero?
-          end
+          comparison = ValueOrdering.compare(left[1], right[1], order, evaluator)
           comparison.zero? ? left[2] <=> right[2] : comparison
         end
         keyed.map(&:first)
@@ -154,7 +143,7 @@ module H2
         @evaluator.validate(statement.having, aggregates: true)
         @order = resolve_order(statement.order, @projections)
         @order.each { @evaluator.validate(it.expression, aggregates: true) }
-        @grouped = !statement.group.empty? || ([statement.having] + @projections.map(&:expression) + @order.map(&:expression)).any? do
+        @grouped = statement.aggregate_query || !statement.group.empty? || ([statement.having] + @projections.map(&:expression) + @order.map(&:expression)).any? do
           @evaluator.contains_aggregate?(it)
         end
         if @grouped
@@ -210,6 +199,13 @@ module H2
       def constant?
         super && !@statement.source && !@statement.where && !@grouped && !@statement.having &&
           @projections.all? { @evaluator.constant_expression?(it.expression) }
+      end
+
+      def expanded_statement
+        projections = @projections.map do |projection|
+          projection.expression.is_a?(BoundColumn) ? projection.with(label: nil) : projection
+        end
+        @statement.with(projections: projections)
       end
     end
 
@@ -270,7 +266,7 @@ module H2
             expression(node.cast ? Cast.new(Literal.new(node.value), node.type) : Literal.new(node.value), inside: inside)
           end
         when TimeZoneExpression then "#{expression(node.expression, inside: true)} AT #{node.zone ? "TIME ZONE #{expression(node.zone, inside: true)}" : 'LOCAL'}"
-        when BoundColumn then node.binding.name
+        when BoundColumn then inside && node.binding.qualifier ? "#{node.binding.qualifier}.#{node.binding.name}" : node.binding.name
         when ColumnRef then inside && node.qualifier ? "#{node.qualifier}.#{node.name}" : node.name
         when Literal
           case node.value
@@ -301,6 +297,15 @@ module H2
           else
             "#{node.name}(#{node.distinct ? 'DISTINCT ' : ''}#{node.arguments.map { expression(it, inside: true) }.join(', ')})"
           end
+        when Aggregate
+          body = "#{node.distinct ? 'DISTINCT ' : ''}#{node.arguments.map { expression(it, inside: true) }.join(', ')}"
+          unless node.order.empty?
+            body += " ORDER BY " + node.order.map do |ordering|
+              expression(ordering.expression, inside: true) + (ordering.descending ? " DESC" : "") +
+                (ordering.nulls ? " NULLS #{ordering.nulls.to_s.upcase}" : "")
+            end.join(', ')
+          end
+          "#{node.name}(#{body})" + (node.filter ? " FILTER (WHERE #{expression(node.filter, inside: true)})" : "")
         when Binary then "#{expression(node.left, inside: true)} #{node.operator} #{expression(node.right, inside: true)}"
         when IntervalDifference then "(#{expression(node.left, inside: true)} - #{expression(node.right, inside: true)}) #{Intervals.sql(node.type).delete_prefix('INTERVAL ')}"
         when Unary then "#{node.operator} #{expression(node.operand, inside: true)}"
@@ -361,6 +366,7 @@ module H2
         case node
         when TableSource then "PUBLIC.#{node.name}"
         when RangeSource then "#{node.name}(#{node.arguments.map { expression(it, inside: true) }.join(', ')})"
+        when UnnestSource then "UNNEST(#{node.arguments.map { expression(it, inside: true) }.join(', ')})#{node.ordinality ? ' WITH ORDINALITY' : ''}"
         when AliasedSource then "#{source(node.source)} #{node.name}"
         when DerivedSource then "(#{query(node.query)})"
         else "JOIN"

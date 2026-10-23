@@ -105,6 +105,15 @@ module H2
           else
             "#{node.name}(#{node.distinct ? 'DISTINCT ' : ''}#{node.arguments.map { render.call(it) }.join(', ')})"
           end
+        when SQL::Aggregate
+          body = "#{node.distinct ? 'DISTINCT ' : ''}#{node.arguments.map { render.call(it) }.join(', ')}"
+          unless node.order.empty?
+            body += " ORDER BY " + node.order.map do |ordering|
+              render.call(ordering.expression) + (ordering.descending ? " DESC" : " ASC") +
+                (ordering.nulls ? " NULLS #{ordering.nulls.to_s.upcase}" : "")
+            end.join(', ')
+          end
+          "#{node.name}(#{body})" + (node.filter ? " FILTER(WHERE #{render.call(node.filter)})" : "")
         when SQL::RowConstructor then "ROW(#{node.expressions.map { render.call(it) }.join(', ')})"
         when SQL::ArrayConstructor then "ARRAY[#{node.expressions.map { render.call(it) }.join(', ')}]"
         when SQL::ArrayElement then "(#{render.call(node.array)})[#{render.call(node.index)}]"
@@ -184,6 +193,12 @@ module H2
         when SQL::TableSource
           !node.qualified && ctes.include?(node.name) ? identifier(node.name) : table_name(node.name)
         when SQL::RangeSource then "#{node.name}(#{node.arguments.map { expression(it, parameters: parameters, ctes: ctes) }.join(', ')})"
+        when SQL::UnnestSource
+          arguments = node.arguments.each_with_index.map do |argument, index|
+            text = expression(argument, parameters: parameters, ctes: ctes)
+            node.types[index].name == "NULL" ? "COALESCE(#{text}, NULL)" : text
+          end
+          "UNNEST(#{arguments.join(', ')})#{node.ordinality ? ' WITH ORDINALITY' : ''}"
         when SQL::DerivedSource then "(#{query(node.query, parameters: parameters, ctes: ctes)})"
         when SQL::AliasedSource
           text = "#{source(node.source, parameters: parameters, ctes: ctes)} AS #{identifier(node.name)}"

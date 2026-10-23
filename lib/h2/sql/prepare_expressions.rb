@@ -14,11 +14,13 @@ module H2
         return node unless node.is_a?(Data) && node.class.name.start_with?("H2::SQL::")
         return node if node.is_a?(TypedLiteral) || node.is_a?(CapturedExpression)
 
-        if node.is_a?(CaseExpression) && closed?(node) && relevant?(node)
-          choice, = @evaluator.prepared_case(node)
-          return prepare(choice) unless choice.is_a?(CaseExpression)
-        end
+        return prepare_case(node) if node.is_a?(CaseExpression)
         node = node.with(**node.to_h.transform_values { prepare(it) })
+        if node.is_a?(Binary) && %w[+ - * /].include?(node.operator) && closed?(node) && foldable?(node)
+          @evaluator.validate(node)
+          optimized = @evaluator.optimized_expression(node)
+          return optimized unless optimized == node
+        end
         if (node.is_a?(ArrayConstructor) || node.is_a?(ArrayElement) ||
             (node.is_a?(Function) && ArrayFunctions::ARITIES.key?(node.name))) && statically_typed?(node)
           @evaluator.validate(node)
@@ -45,6 +47,48 @@ module H2
 
       private
 
+      def prepare_case(node)
+        operand = node.operand && prepare(node.operand)
+        choose = !operand || compile_constant?(operand)
+        value = @evaluator.evaluate(operand) if operand && choose
+        branches = []
+        node.branches.each_with_index do |(condition, result), index|
+          condition = prepare(condition)
+          result = prepare(result) unless operand
+          matched = false
+          if choose
+            if compile_constant?(condition)
+              candidate = @evaluator.evaluate(condition)
+              Type.check_comparable(@evaluator.type_of(operand), @evaluator.type_of(condition)) if operand
+              matched = operand ? @evaluator.equals(value, candidate) == true : @evaluator.boolean(candidate) == true
+            else
+              choose = false
+            end
+          end
+          result = prepare(result) if operand
+          branches << [condition, result]
+          if matched
+            return simplify_case(node.with(operand: operand, branches: branches + node.branches.drop(index + 1)))
+          end
+        end
+        simplify_case(node.with(operand: operand, branches: branches, fallback: prepare(node.fallback)))
+      end
+
+      def simplify_case(result)
+        if closed?(result)
+          expression, type = @evaluator.prepared_case(result)
+          if expression.is_a?(Literal) && expression.value.nil? && type.name != "NULL"
+            return TypedLiteral.new(nil, type, true)
+          end
+          return expression unless expression.is_a?(CaseExpression)
+        end
+        result
+      end
+
+      def compile_constant?(node)
+        closed?(node) && foldable?(node) && @evaluator.constant_expression?(node)
+      end
+
       def children(node)
         return [node.operand, *node.branches.flatten, node.fallback].compact if node.is_a?(CaseExpression)
 
@@ -52,13 +96,13 @@ module H2
       end
 
       def closed?(node)
-        return false if [ColumnRef, BoundColumn, Parameter, CurrentDateTime, Subquery, Exists, InQuery, ArrayQuery, Star].any? { node.is_a?(it) }
+        return false if [ColumnRef, BoundColumn, Parameter, CurrentDateTime, Subquery, Exists, InQuery, ArrayQuery, Aggregate, Star].any? { node.is_a?(it) }
 
         children(node).all? { closed?(it) }
       end
 
       def statically_typed?(node)
-        return false if [ColumnRef, BoundColumn, Subquery, Exists, InQuery, ArrayQuery, Star].any? { node.is_a?(it) }
+        return false if [ColumnRef, BoundColumn, Subquery, Exists, InQuery, ArrayQuery, Aggregate, Star].any? { node.is_a?(it) }
 
         children(node).all? { statically_typed?(it) }
       end
@@ -85,6 +129,7 @@ module H2
       end
 
       def relevant?(node)
+        return true if node.is_a?(Cast) && node.type.name == "NULL"
         return true if node.is_a?(Function) && ArrayFunctions::ARITIES.key?(node.name)
         return true if node.is_a?(ArrayConstructor) || node.is_a?(ArrayElement)
         return true if node.is_a?(Literal) && node.value.is_a?(ArrayValue)

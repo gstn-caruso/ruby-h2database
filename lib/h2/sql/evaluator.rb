@@ -3,8 +3,8 @@
 module H2
   module SQL
     class Evaluator
-      AGGREGATES = %w[COUNT SUM AVG MIN MAX].freeze
-      FUNCTIONS = {"COUNT" => 1..1, "SUM" => 1..1, "AVG" => 1..1, "MIN" => 1..1, "MAX" => 1..1,
+      AGGREGATES = Aggregate::NAMES
+      FUNCTIONS = {"COUNT" => 1..1, "SUM" => 1..1, "AVG" => 1..1, "MIN" => 1..1, "MAX" => 1..1, "ARRAY_AGG" => 1..1,
         "UPPER" => 1..1, "UCASE" => 1..1, "LOWER" => 1..1, "LCASE" => 1..1, "LENGTH" => 1..1, "CHAR_LENGTH" => 1..1,
         "OCTET_LENGTH" => 1..1, "BIT_LENGTH" => 1..1,
         "ABS" => 1..1, "COALESCE" => 1..Float::INFINITY, "IFNULL" => 2..2, "NULLIF" => 2..2, "MOD" => 2..2,
@@ -45,7 +45,7 @@ module H2
           plan.outer_bindings.each do |binding|
             @outer_bindings << binding unless scope.local?(binding) || @outer_bindings.include?(binding)
           end
-        when Function
+        when Function, Aggregate
           arity = FUNCTIONS[node.name]
           raise Error.new(50100, "Function #{node.name} not yet ported") unless arity
           raise Error.new(7001, "Invalid argument count for #{node.name}") unless arity.cover?(node.arguments.length)
@@ -62,6 +62,13 @@ module H2
               next
             end
             validate(argument, aggregates: aggregates, inside_aggregate: inside_aggregate || aggregate)
+          end
+          if node.is_a?(Aggregate)
+            node.arguments.each { evaluate(it) if !it.is_a?(Star) && constant?(it) }
+            node.order.each { validate(it.expression, inside_aggregate: true) }
+            validate(node.filter, inside_aggregate: true)
+            boolean(evaluate(node.filter)) if node.filter && constant?(node.filter)
+            aggregate_order(node)
           end
           argument_type = type_of(node.arguments.first)
           if %w[SUM AVG].include?(node.name) && (argument_type.is_a?(ArrayType) || (%w[BINARY VARBINARY UUID] + Temporal::NAMES).include?(argument_type&.name))
@@ -93,7 +100,7 @@ module H2
 
       def contains_aggregate?(node)
         return false unless node
-        return true if node.is_a?(Function) && AGGREGATES.include?(node.name)
+        return true if node.is_a?(Aggregate) || (node.is_a?(Function) && AGGREGATES.include?(node.name))
 
         children(node).any? { contains_aggregate?(it) }
       end
@@ -145,7 +152,7 @@ module H2
       def validate_grouping(node, groups)
         return unless node
         return if groups.any? { canonical(it) == canonical(node) }
-        return if node.is_a?(Function) && AGGREGATES.include?(node.name)
+        return if node.is_a?(Aggregate) || (node.is_a?(Function) && AGGREGATES.include?(node.name))
         if node.is_a?(Subquery) || node.is_a?(Exists) || node.is_a?(InQuery) || node.is_a?(ArrayQuery)
           subquery_plan(node).outer_bindings.each do |binding|
             @group_correlations << binding if scope.local?(binding) && !@group_correlations.include?(binding)
@@ -212,6 +219,7 @@ module H2
           left.nil? || right.nil? ? nil : IntervalOperations.forced_difference(node.type, left, right, context: context)
         when Predicate then predicate(node, row, group)
         when Cast then node.type.convert(evaluate(node.expression, row, group), cast: true, source_type: type_of(node.expression), context: context)
+        when Aggregate then aggregate(node, group)
         when Function then function(node, row, group)
         when RowConstructor then RowValue.new(node.expressions.map { evaluate(it, row, group) })
         when ArrayConstructor
@@ -418,7 +426,7 @@ module H2
           end
         when Unary then node.operator == "NOT" ? Type.new("BOOLEAN", nil, nil) : type_of(node.operand)
         when Predicate then Type.new("BOOLEAN", nil, nil)
-        when Function then function_type(node)
+        when Function, Aggregate then function_type(node)
         when Binary
           return Type.new("BOOLEAN", nil, nil) if %w[AND OR = <> != < > <= >=].include?(node.operator)
           if node.operator == "||"
@@ -438,9 +446,7 @@ module H2
           return TemporalOperations.type(node.operator, *types) if types.any? { Temporal::NAMES.include?(it&.name) }
 
           type = Type.common(types)
-          if node.operator == "*" && type.name == "NUMERIC"
-            type = type.with(scale: types.compact.sum { it.scale || 0 })
-          end
+          return NumericOperations.type(node.operator, *types) if type.name == "NUMERIC"
           type
         end
       end
@@ -450,6 +456,7 @@ module H2
         when Unary then [node.operand]
         when Binary, IntervalDifference then [node.left, node.right]
         when Predicate, Function then node.arguments
+        when Aggregate then [*node.arguments, *node.order.map(&:expression), node.filter].compact
         when Cast then [node.expression]
         when TimeZoneExpression then [node.expression, node.zone].compact
         when RowConstructor, ArrayConstructor then node.expressions
@@ -466,6 +473,26 @@ module H2
       end
 
       def optimized_expression(node)
+        if node.is_a?(Aggregate)
+          return node.with(arguments: node.arguments.map { optimized_expression(it) }, order: aggregate_order(node))
+        end
+        if node.is_a?(CaseExpression)
+          expression, type = prepared_case(node)
+          unless expression.is_a?(CaseExpression)
+            return TypedLiteral.new(nil, type, true) if expression.is_a?(Literal) && expression.value.nil? && type.name != "NULL"
+
+            return optimized_expression(expression)
+          end
+        end
+        if node.is_a?(InQuery) && node.query.is_a?(Select)
+          return node.with(query: subquery_plan(node).expanded_statement)
+        end
+        if node.is_a?(Binary) && %w[+ - * /].include?(node.operator) && constant?(node)
+          type = type_of(node)
+          if type.name == "NUMERIC" || Type::INTEGER_LIMITS.key?(type.name)
+            return NumericOperations.literal(evaluate(node), type)
+          end
+        end
         if (node.is_a?(ArrayConstructor) || node.is_a?(ArrayElement)) && constant?(node)
           value = evaluate(node)
           return value.nil? ? TypedLiteral.new(value, type_of(node), type_of(node).name != "NULL") : Literal.new(value)
@@ -673,6 +700,9 @@ module H2
         when Unary then node.with(operand: canonical(node.operand))
         when Binary, IntervalDifference then node.with(left: canonical(node.left), right: canonical(node.right))
         when Predicate, Function then node.with(arguments: node.arguments.map { canonical(it) })
+        when Aggregate
+          node.with(arguments: node.arguments.map { canonical(it) },
+            order: node.order.map { it.with(expression: canonical(it.expression)) }, filter: node.filter && canonical(node.filter))
         when Cast then node.with(expression: canonical(node.expression))
         when TimeZoneExpression then node.with(expression: canonical(node.expression), zone: node.zone && canonical(node.zone))
         when RowConstructor, ArrayConstructor then node.with(expressions: node.expressions.map { canonical(it) })
@@ -710,6 +740,7 @@ module H2
           return IntervalOperations.aggregate_type(node.name, argument_type)
         end
         case node.name
+        when "ARRAY_AGG" then ArrayType.new(argument_type, ArrayValue::MAX_CARDINALITY)
         when "COUNT", "LENGTH", "CHAR_LENGTH", "OCTET_LENGTH", "BIT_LENGTH" then Type.new("BIGINT", nil, 0)
         when "UPPER", "UCASE", "LOWER", "LCASE" then Type.new("VARCHAR", nil, nil)
         when "ABS", "MIN", "MAX", "NULLIF" then argument_type
@@ -838,7 +869,9 @@ module H2
           when "-" then left - right
           when "*" then left * right
           when "/"
-            if left.is_a?(Integer) && right.is_a?(Integer)
+            if type_of(node).name == "NUMERIC"
+              NumericOperations.divide(left, right, type_of(node).scale)
+            elsif left.is_a?(Integer) && right.is_a?(Integer)
               (left.negative? ^ right.negative? ? -1 : 1) * (left.abs / right.abs)
             else
               left / right
@@ -951,6 +984,10 @@ module H2
       end
 
       def aggregate(node, group)
+        group = group.select { boolean(evaluate(node.filter, it)) == true } if node.is_a?(Aggregate) && node.filter
+        if node.name == "ARRAY_AGG"
+          return ArrayAggregation.evaluate(node, group, self, aggregate_order(node))
+        end
         argument = node.arguments.first
         return group.size if argument.is_a?(Star)
 
@@ -982,6 +1019,15 @@ module H2
           end
         when "MIN" then values.min { compare(_1, _2) }
         when "MAX" then values.max { compare(_1, _2) }
+        end
+      end
+
+      def aggregate_order(node)
+        node.order.reject do |ordering|
+          next false unless constant?(ordering.expression)
+
+          evaluate(ordering.expression)
+          true
         end
       end
     end

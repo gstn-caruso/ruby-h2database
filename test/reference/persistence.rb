@@ -176,6 +176,16 @@ queries.concat(["TABLE arrays ORDER BY a", "TABLE array_defaults ORDER BY a", "T
 changes.concat(["UPDATE arrays SET b=ARRAY[X'ffff'],d=d||3.750 WHERE a=ARRAY[]", "INSERT INTO arrays(a) VALUES(ARRAY[1,2])",
   "DELETE FROM arrays WHERE a=ARRAY[1,2,3]", "INSERT INTO array_defaults DEFAULT VALUES", "INSERT INTO empty_arrays VALUES(ARRAY[1,2])"])
 
+schema.concat([
+  "CREATE TABLE array_aggregates AS SELECT ARRAY_AGG(a ORDER BY a) AS a,COUNT(*) FILTER(WHERE CARDINALITY(a)>0) AS n FROM arrays",
+  "CREATE TABLE array_aggregate_defaults(a INT ARRAY DEFAULT (SELECT ARRAY_AGG(v ORDER BY v DESC) FILTER(WHERE v>0) FROM source),u INT ARRAY DEFAULT (SELECT ARRAY_AGG(c1 ORDER BY c1) FROM UNNEST(COALESCE(ARRAY[1,2],NULL))))",
+  "INSERT INTO array_aggregate_defaults DEFAULT VALUES",
+  "CREATE TABLE unnested AS SELECT * FROM UNNEST(ARRAY[1,2],ARRAY['a']) WITH ORDINALITY",
+  "CREATE TABLE unnest_unknown AS SELECT * FROM UNNEST(1)"
+])
+queries.concat(["TABLE array_aggregates ORDER BY n", "TABLE array_aggregate_defaults ORDER BY a", "TABLE unnested ORDER BY nord", "TABLE unnest_unknown"])
+changes.concat(["INSERT INTO array_aggregate_defaults DEFAULT VALUES", "INSERT INTO array_aggregates SELECT ARRAY_AGG(a ORDER BY a),COUNT(*) FILTER(WHERE CARDINALITY(a)>0) FROM arrays"])
+
 intervals = [
   ["YEAR", "1"], ["MONTH", "2"], ["DAY", "3"], ["HOUR", "4"], ["MINUTE", "5"], ["SECOND", "6.123456789"],
   ["YEAR TO MONTH", "1-2"], ["DAY TO HOUR", "1 2"], ["DAY TO MINUTE", "1 2:3"], ["DAY TO SECOND", "1 2:3:4.123456789"],
