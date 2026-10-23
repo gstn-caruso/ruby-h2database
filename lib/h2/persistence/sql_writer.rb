@@ -104,6 +104,9 @@ module H2
       def query(node, parameters: [])
         render = ->(child) { expression(child, parameters: parameters) }
         sql = case node
+        when SQL::SetQuery
+          operator = {union: "UNION", union_all: "UNION ALL", except: "EXCEPT", intersect: "INTERSECT"}.fetch(node.operator)
+          "(#{query(node.left, parameters: parameters)}) #{operator} (#{query(node.right, parameters: parameters)})"
         when SQL::Values
           "VALUES " + node.rows.map { |row| "(#{row.map { render.call(it) }.join(', ')})" }.join(", ")
         when SQL::Select
@@ -119,7 +122,9 @@ module H2
         end
         unless node.order.empty?
           sql += " ORDER BY " + node.order.map do |order|
-            render.call(order.expression) + (order.descending ? " DESC" : " ASC") + (order.nulls ? " NULLS #{order.nulls.to_s.upcase}" : "")
+            expression = render.call(order.expression)
+            expression = "(#{expression})" if !order.position && order.expression.is_a?(SQL::Literal) && order.expression.value.is_a?(Integer)
+            expression + (order.descending ? " DESC" : " ASC") + (order.nulls ? " NULLS #{order.nulls.to_s.upcase}" : "")
           end.join(", ")
         end
         sql += " LIMIT #{render.call(node.limit)}" if node.limit

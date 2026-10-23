@@ -12,6 +12,7 @@ module H2
         klass = case statement
         when Select then SelectPlan
         when Values then ValuesPlan
+        when SetQuery then SetPlan
         else raise Error.new(42000, "Expected query")
         end
         klass.new(statement, @parameters, self, @sources, outer_scope)

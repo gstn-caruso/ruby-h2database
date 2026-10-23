@@ -108,6 +108,25 @@ module H2
       raise Error.new(22018, "Cannot convert #{value.inspect} to #{name}")
     end
 
+    def coerce(value, source_type: nil)
+      return nil if value.nil?
+
+      case name
+      when "CHAR"
+        CharacterString.trim_spaces(with(precision: nil).convert(value, source_type: source_type))
+      when "VARCHAR", "BINARY", "VARBINARY"
+        with(precision: nil).convert(value, source_type: source_type)
+      when "NUMERIC"
+        number = BigDecimal(numeric_input(value).to_s)
+        raise Error.new(22018, "Non-finite NUMERIC value") unless number.finite?
+
+        number
+      else convert(value, source_type: source_type)
+      end
+    rescue ArgumentError, TypeError
+      raise Error.new(22018, "Cannot coerce #{value.inspect} to #{name}")
+    end
+
     private
 
     def numeric_input(value)

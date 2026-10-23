@@ -51,5 +51,17 @@ module H2
         type.convert(value.values[index], cast: cast, source_type: field_type)
       end)
     end
+
+    def coerce(value, source_type: nil)
+      return nil if value.nil?
+
+      value = RowValue.new([value]) unless value.is_a?(RowValue)
+      raise Error.new(21002, "Row column count does not match") unless value.values.length == fields.length
+
+      RowValue.new(fields.each_with_index.map do |type, index|
+        field_type = source_type.is_a?(RowType) ? source_type.fields[index] : source_type
+        type.coerce(value.values[index], source_type: field_type)
+      end)
+    end
   end
 end
