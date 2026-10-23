@@ -35,7 +35,7 @@ module H2
       "ROW"
     end
 
-    def convert(value, cast: false, source_type: nil)
+    def convert(value, cast: false, source_type: nil, context: nil)
       return nil if value.nil?
       unless value.is_a?(RowValue)
         raise Error.new(22018, "Cannot convert scalar to a multi-column row") unless fields.length == 1
@@ -48,11 +48,11 @@ module H2
 
       RowValue.new(fields.each_with_index.map do |type, index|
         field_type = source_type.is_a?(RowType) ? source_type.fields[index] : source_type
-        type.convert(value.values[index], cast: cast, source_type: field_type)
+        type.convert(value.values[index], cast: cast, source_type: field_type, context: context)
       end)
     end
 
-    def coerce(value, source_type: nil)
+    def coerce(value, source_type: nil, context: nil)
       return nil if value.nil?
 
       value = RowValue.new([value]) unless value.is_a?(RowValue)
@@ -60,7 +60,7 @@ module H2
 
       RowValue.new(fields.each_with_index.map do |type, index|
         field_type = source_type.is_a?(RowType) ? source_type.fields[index] : source_type
-        type.coerce(value.values[index], source_type: field_type)
+        type.coerce(value.values[index], source_type: field_type, context: context)
       end)
     end
   end

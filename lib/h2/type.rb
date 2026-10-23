@@ -75,7 +75,7 @@ module H2
       new(name, precision, scale)
     end
 
-    def convert(value, cast: false, source_type: nil)
+    def convert(value, cast: false, source_type: nil, context: nil)
       return nil if value.nil?
 
       case name
@@ -112,7 +112,7 @@ module H2
 
         BinaryString.binary?(value) ? UUIDValue.new(value) : UUIDValue.parse(value)
       when *Temporal::NAMES
-        value = Temporal.convert(value, name)
+        value = Temporal.convert(value, name, context: context)
         name == "DATE" ? value : value.round(scale || (name == "TIME" ? 0 : 6))
       when *Intervals::NAMES
         Intervals.convert(value, Intervals.qualifier(self)).round(self)
@@ -138,16 +138,16 @@ module H2
       raise Error.new(22018, "Cannot convert #{value.inspect} to #{name}")
     end
 
-    def coerce(value, source_type: nil)
+    def coerce(value, source_type: nil, context: nil)
       return nil if value.nil?
 
       case name
       when "CHAR"
-        CharacterString.trim_spaces(with(precision: nil).convert(value, source_type: source_type))
+        CharacterString.trim_spaces(with(precision: nil).convert(value, source_type: source_type, context: context))
       when "VARCHAR", "BINARY", "VARBINARY"
-        with(precision: nil).convert(value, source_type: source_type)
+        with(precision: nil).convert(value, source_type: source_type, context: context)
       when *Temporal::NAMES
-        Temporal.convert(value, name)
+        Temporal.convert(value, name, context: context)
       when *Intervals::NAMES
         Intervals.convert(value, Intervals.qualifier(self))
       when "NUMERIC"
@@ -155,7 +155,7 @@ module H2
         raise Error.new(22018, "Non-finite NUMERIC value") unless number.finite?
 
         number
-      else convert(value, source_type: source_type)
+      else convert(value, source_type: source_type, context: context)
       end
     rescue ArgumentError, TypeError
       raise Error.new(22018, "Cannot coerce #{value.inspect} to #{name}")

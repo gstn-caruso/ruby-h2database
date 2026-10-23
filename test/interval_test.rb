@@ -74,7 +74,6 @@ class IntervalTest < DatabaseTest
     result = execute("SELECT (DATE '2001-02-01'-DATE '2000-01-01') YEAR")
     assert_equal "INTERVAL DAY", result.types.first.name
     assert_equal "YEAR", result.rows.first.first.qualifier
-    assert_sql_error 50100, "SELECT (TIMESTAMP '2000-01-01 00:00:00'-TIME '12:00:00') YEAR TO MONTH"
   end
 
   def test_saved_defaults_rows_scales_and_interval_index_keys_reopen

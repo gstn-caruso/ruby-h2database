@@ -27,7 +27,7 @@ module H2
       private
 
       def key(row)
-        row.each_with_index.map { |value, index| @types[index].coerce(value, source_type: @types[index]) }
+        row.each_with_index.map { |value, index| @types[index].coerce(value, source_type: @types[index], context: @evaluator.context) }
       end
 
       def compare(left, right)

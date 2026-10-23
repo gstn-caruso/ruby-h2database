@@ -46,9 +46,9 @@ module H2
       end
     end
 
-    def convert_row(values, existing_row: nil, source_types: {})
+    def convert_row(values, existing_row: nil, source_types: {}, context: nil)
       row = columns.to_h do |column|
-        value = column.type.convert(values.fetch(column.name), source_type: source_types[column.name])
+        value = column.type.convert(values.fetch(column.name), source_type: source_types[column.name], context: context)
         primary = keys.any? { it.primary && it.columns.include?(column.name) }
         if value.nil? && (!column.nullable || primary)
           raise Error.new(23502, "NULL not allowed for #{column.name}")

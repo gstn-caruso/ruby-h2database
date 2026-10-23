@@ -4,6 +4,7 @@ module H2
   module SQL
     UNBOUND_PARAMETER = Object.new.freeze
     Literal = Data.define(:value)
+    CurrentDateTime = Data.define(:name, :scale)
     Parameter = Data.define(:index)
     ColumnRef = Data.define(:name, :qualifier)
     BoundColumn = Data.define(:binding)

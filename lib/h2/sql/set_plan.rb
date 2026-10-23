@@ -50,7 +50,7 @@ module H2
       private
 
       def convert_rows(rows, source_types)
-        rows.map { |row| row.each_with_index.map { |value, index| types[index].coerce(value, source_type: source_types[index]) } }
+        rows.map { |row| row.each_with_index.map { |value, index| types[index].coerce(value, source_type: source_types[index], context: @evaluator.context) } }
       end
 
       def prepare_order(order)

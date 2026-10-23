@@ -5,11 +5,12 @@ module H2
     class Executor
       attr_reader :changes
 
-      def initialize(catalog, parameters)
+      def initialize(catalog, parameters, context: nil)
         @catalog = catalog
         @parameters = parameters
         @changes = {}
-        @queries = Queries.new(catalog, parameters)
+        @context = context
+        @queries = Queries.new(catalog, parameters, context: context)
       end
 
       def execute(statement)
@@ -47,7 +48,7 @@ module H2
             next unless default
 
             expression, parameters = default.is_a?(CapturedExpression) ? [default.expression, default.parameters] : [default, []]
-            evaluator = Evaluator.new(parameters, queries: Queries.new(remaining, parameters))
+            evaluator = Evaluator.new(parameters, queries: Queries.new(remaining, parameters, context: @context))
             evaluator.validate(expression)
           rescue Error => error
             raise unless [42102, 42104].include?(error.code)
@@ -74,7 +75,7 @@ module H2
           evaluator.validate(column.default)
           next column unless column.default
 
-          default = if evaluator.contains_subquery?(column.default)
+          default = if evaluator.contains_subquery?(column.default) || evaluator.session_dependent?(column.default)
             CapturedExpression.new(column.default, @parameters.dup.freeze)
           elsif %w[BINARY VARBINARY].include?(column.type.name)
             evaluator.evaluate(column.default)
@@ -100,7 +101,7 @@ module H2
         target = Table.new(statement.name, columns, statement.keys)
         if result && statement.with_data
           source_types = columns.map(&:name).zip(result.types).to_h
-          result.rows.each { target.rows << target.convert_row(columns.map(&:name).zip(it).to_h, source_types: source_types) }
+          result.rows.each { target.rows << target.convert_row(columns.map(&:name).zip(it).to_h, source_types: source_types, context: @context) }
         end
         change(target, 0)
       end
@@ -135,7 +136,7 @@ module H2
             end
             [column.name, value_evaluator.evaluate(expression)]
           end
-          target.rows << target.convert_row(row, source_types: source_types)
+          target.rows << target.convert_row(row, source_types: source_types, context: @context)
         end
         change(target, source_rows.length)
       end
@@ -158,7 +159,7 @@ module H2
 
           values = assignments.to_h { |name, expression, value_evaluator| [name, value_evaluator.evaluate(expression, row)] }
           count += 1
-          target.convert_row(row.merge(values), existing_row: row, source_types: source_types)
+          target.convert_row(row.merge(values), existing_row: row, source_types: source_types, context: @context)
         end
         change(target, count)
       end
@@ -180,7 +181,7 @@ module H2
         default = column.default
         return [default || Literal.new(nil), evaluator] unless default.is_a?(CapturedExpression)
 
-        queries = Queries.new(@catalog, default.parameters)
+        queries = Queries.new(@catalog, default.parameters, context: @context)
         [default.expression, Evaluator.new(default.parameters, queries: queries)]
       end
     end

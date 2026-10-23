@@ -235,7 +235,7 @@ module H2
 
       def execute(outer_row = {}, max_rows: nil)
         entries = @statement.rows.lazy.map do |expressions|
-          row = expressions.each_with_index.map { |expression, index| types[index].convert(@evaluator.evaluate(expression, outer_row), cast: true, source_type: @evaluator.type_of(expression)) }
+          row = expressions.each_with_index.map { |expression, index| types[index].convert(@evaluator.evaluate(expression, outer_row), cast: true, source_type: @evaluator.type_of(expression), context: @evaluator.context) }
           context = outer_row.merge(@bindings.each_with_index.to_h { |binding, index| [binding.key, row[index]] })
           [row, context, nil]
         end
@@ -255,6 +255,7 @@ module H2
 
       def expression(node, inside: false)
         case node
+        when CurrentDateTime then node.name + (node.scale.nil? ? "" : "(#{node.scale})")
         when BoundColumn then node.binding.name
         when ColumnRef then inside && node.qualifier ? "#{node.qualifier}.#{node.name}" : node.name
         when Literal

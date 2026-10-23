@@ -10,12 +10,13 @@ module H2
         "ABS" => 1..1, "COALESCE" => 1..Float::INFINITY, "IFNULL" => 2..2, "NULLIF" => 2..2, "MOD" => 2..2,
         "EXTRACT" => 2..2, "DATE_TRUNC" => 2..2, "LAST_DAY" => 1..1, "DATEADD" => 3..3, "DATEDIFF" => 3..3}.freeze
 
-      attr_reader :scope, :outer_bindings
+      attr_reader :scope, :outer_bindings, :context
 
       def initialize(parameters, columns = [], qualifiers = [], scope: nil, queries: nil)
         @parameters = parameters
         @scope = scope || Scope.for_columns(columns, qualifiers)
         @queries = queries
+        @context = queries&.context
         @subqueries = {}
         @constant_subqueries = {}
         @outer_bindings = []
@@ -30,7 +31,7 @@ module H2
         when ColumnRef
           binding = scope.resolve(node)
           @outer_bindings << binding unless scope.local?(binding) || @outer_bindings.include?(binding)
-        when Literal, Parameter, BoundColumn
+        when Literal, Parameter, BoundColumn, CurrentDateTime
           nil
         when CaseExpression
           expression, _type = prepared_case(node)
@@ -97,6 +98,18 @@ module H2
         children(node).any? { contains_subquery?(it) }
       end
 
+      def session_dependent?(node)
+        return true if node.is_a?(CurrentDateTime)
+        if node.is_a?(Cast) && node.type.name == "TIMESTAMP" && type_of(node.expression)&.name == "TIME"
+          return true
+        end
+        if node.is_a?(IntervalDifference) && IntervalUnits.year_month?(IntervalUnits.ordinal(Intervals.qualifier(node.type)))
+          names = [type_of(node.left).name, type_of(node.right).name]
+          return true if names.include?("TIME") && names.uniq.length > 1
+        end
+        children(node).any? { session_dependent?(it) }
+      end
+
       def validate_grouping(node, groups)
         return unless node
         return if groups.any? { canonical(it) == canonical(node) }
@@ -138,6 +151,10 @@ module H2
       def evaluate(node, row = {}, group = nil)
         case node
         when Literal then node.value
+        when CurrentDateTime
+          raise Error.new(50100, "Current-clock function requires a SQL session context") unless context
+
+          type_of(node).convert(context.current_timestamp, context: context)
         when Parameter
           value = @parameters.fetch(node.index)
           value.equal?(UNBOUND_PARAMETER) ? nil : value
@@ -155,9 +172,9 @@ module H2
         when Binary then binary(node, row, group)
         when IntervalDifference
           left, right = [node.left, node.right].map { evaluate(it, row, group) }
-          left.nil? || right.nil? ? nil : IntervalOperations.forced_difference(node.type, left, right)
+          left.nil? || right.nil? ? nil : IntervalOperations.forced_difference(node.type, left, right, context: context)
         when Predicate then predicate(node, row, group)
-        when Cast then node.type.convert(evaluate(node.expression, row, group), cast: true, source_type: type_of(node.expression))
+        when Cast then node.type.convert(evaluate(node.expression, row, group), cast: true, source_type: type_of(node.expression), context: context)
         when Function then function(node, row, group)
         when RowConstructor then RowValue.new(node.expressions.map { evaluate(it, row, group) })
         when Subquery
@@ -178,7 +195,7 @@ module H2
           values.any? { contains_null?(it) } ? nil : false
         when CaseExpression
           expression, type = prepared_case(node)
-          return type.convert(evaluate(expression, row, group), cast: true) unless expression.is_a?(CaseExpression)
+          return type.convert(evaluate(expression, row, group), cast: true, context: context) unless expression.is_a?(CaseExpression)
 
           operand = evaluate(expression.operand, row, group) if expression.operand
           branch = expression.branches.find do |condition, _value|
@@ -186,7 +203,7 @@ module H2
             expression.operand ? equals(operand, candidate) == true : boolean(candidate) == true
           end
           value = evaluate(branch ? branch.last : expression.fallback, row, group)
-          type.convert(value, cast: true)
+          type.convert(value, cast: true, context: context)
         else raise Error.new(42000, "Invalid expression")
         end
       end
@@ -212,7 +229,7 @@ module H2
           return Intervals.convert(left, Intervals.qualifier(type)).absolute <=> Intervals.convert(right, Intervals.qualifier(type)).absolute
         elsif Temporal.value?(left) || Temporal.value?(right)
           Type.check_comparable(type_of(Literal.new(left)), type_of(Literal.new(right)))
-          return Temporal.compare(left, right)
+          return Temporal.compare(left, right, context: context)
         elsif left.is_a?(UUIDValue) || right.is_a?(UUIDValue)
           Type.check_comparable(type_of(Literal.new(left)), type_of(Literal.new(right)))
           uuid = Type.new("UUID", nil, nil)
@@ -251,6 +268,9 @@ module H2
 
       def type_of(node)
         case node
+        when CurrentDateTime
+          name = {"CURRENT_DATE" => "DATE", "LOCALTIME" => "TIME", "LOCALTIMESTAMP" => "TIMESTAMP"}.fetch(node.name)
+          Temporal.type(name, node.scale)
         when ColumnRef then scope.resolve(node).type
         when BoundColumn then node.binding.type
         when Cast then node.type
@@ -426,6 +446,8 @@ module H2
       end
 
       def constant?(node)
+        return false if session_dependent?(node)
+
         case node
         when Literal then true
         when Subquery then subquery_plan(node).constant?
@@ -689,7 +711,7 @@ module H2
         if %w[COALESCE IFNULL].include?(node.name)
           node.arguments.each do |argument|
             value = evaluate(argument, row, group)
-            return function_type(node).convert(value, cast: true, source_type: type_of(argument)) unless value.nil?
+            return function_type(node).convert(value, cast: true, source_type: type_of(argument), context: context) unless value.nil?
           end
           return nil
         end
