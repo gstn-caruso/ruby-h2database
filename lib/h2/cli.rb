@@ -55,6 +55,10 @@ module H2
       when true then "TRUE"
       when false then "FALSE"
       when BigDecimal then value.to_s("F")
+      when String
+        return "X'#{value.unpack1('H*')}'" if BinaryString.binary?(value)
+
+        value.gsub(/[\\\t\n\r]/) { {"\\" => "\\\\", "\t" => "\\t", "\n" => "\\n", "\r" => "\\r"}.fetch(it) }
       else value.to_s.gsub(/[\\\t\n\r]/) { {"\\" => "\\\\", "\t" => "\\t", "\n" => "\\n", "\r" => "\\r"}.fetch(it) }
       end
     end

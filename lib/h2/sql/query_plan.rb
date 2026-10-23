@@ -204,7 +204,7 @@ module H2
 
       def execute(outer_row = {}, max_rows: nil)
         entries = @statement.rows.lazy.map do |expressions|
-          row = expressions.each_with_index.map { |expression, index| types[index].convert(@evaluator.evaluate(expression, outer_row), cast: true) }
+          row = expressions.each_with_index.map { |expression, index| types[index].convert(@evaluator.evaluate(expression, outer_row), cast: true, source_type: @evaluator.type_of(expression)) }
           context = outer_row.merge(@bindings.each_with_index.to_h { |binding, index| [binding.key, row[index]] })
           [row, context, nil]
         end
@@ -227,7 +227,8 @@ module H2
           when nil then "NULL"
           when true then "TRUE"
           when false then "FALSE"
-          when String then "'#{node.value.gsub("'", "''")}'"
+          when String then BinaryString.binary?(node.value) ? "X'#{node.value.unpack1('H*')}'" : "'#{node.value.gsub("'", "''")}'"
+          when UUIDValue then "UUID '#{node.value}'"
           when BigDecimal then node.value.to_s("F")
           else node.value.to_s
           end
@@ -236,7 +237,11 @@ module H2
         when Function then "#{node.name}(#{node.distinct ? 'DISTINCT ' : ''}#{node.arguments.map { expression(it, inside: true) }.join(', ')})"
         when Binary then "#{expression(node.left, inside: true)} #{node.operator} #{expression(node.right, inside: true)}"
         when Unary then "#{node.operator} #{expression(node.operand, inside: true)}"
-        when Cast then "CAST(#{expression(node.expression, inside: true)} AS #{node.type.name})"
+        when Cast
+          type = node.type
+          name = type.name == "VARBINARY" ? "BINARY VARYING" : type.name
+          name += "(#{type.precision})" if %w[BINARY VARBINARY].include?(type.name) && type.precision
+          "CAST(#{expression(node.expression, inside: true)} AS #{name})"
         when RowConstructor then "ROW (#{node.expressions.map { expression(it, inside: true) }.join(', ')})"
         when Subquery then "(#{query(node.query)})"
         when Exists then "EXISTS(#{query(node.query)})"

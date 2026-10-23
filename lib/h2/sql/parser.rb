@@ -10,7 +10,8 @@ module H2
       PRECEDENCE = {"OR" => 1, "AND" => 2, "=" => 4, "<>" => 4, "!=" => 4, "<" => 4,
         ">" => 4, "<=" => 4, ">=" => 4, "||" => 5, "+" => 6, "-" => 6, "*" => 7, "/" => 7, "%" => 7}.freeze
       TYPE_NAMES = {"INT" => "INTEGER", "DECIMAL" => "NUMERIC", "DEC" => "NUMERIC", "BOOL" => "BOOLEAN",
-        "CHARACTER" => "CHAR", "VARCHAR" => "VARCHAR", "FLOAT" => "DOUBLE"}.freeze
+        "CHARACTER" => "CHAR", "VARCHAR" => "VARCHAR", "FLOAT" => "DOUBLE", "RAW" => "VARBINARY",
+        "BYTEA" => "VARBINARY", "LONGVARBINARY" => "VARBINARY"}.freeze
 
       attr_reader :parameter_count
 
@@ -220,19 +221,26 @@ module H2
         name = TYPE_NAMES.fetch(name, name)
         if name == "CHAR" && accept("VARYING")
           name = "VARCHAR"
+        elsif name == "BINARY" && accept("VARYING")
+          name = "VARBINARY"
+        elsif name == "LONG" && accept("RAW")
+          name = "VARBINARY"
         elsif name == "DOUBLE"
           accept("PRECISION")
         end
-        unless %w[TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE BOOLEAN VARCHAR CHAR].include?(name)
+        unless %w[TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE BOOLEAN VARCHAR CHAR BINARY VARBINARY UUID].include?(name)
           raise Error.new(50100, "Type #{name.inspect} not yet ported")
         end
-        precision = name == "NUMERIC" ? 100_000 : (name == "CHAR" ? 1 : nil)
+        precision = name == "NUMERIC" ? 100_000 : (%w[CHAR BINARY].include?(name) ? 1 : nil)
         scale = name == "NUMERIC" ? 0 : nil
         if accept("(")
           precision = positive_integer
           scale = accept(",") ? positive_integer(allow_zero: true) : 0 if name == "NUMERIC"
           expect(")")
-          raise Error.new(50100, "Precision for #{name} not supported") unless %w[NUMERIC VARCHAR CHAR].include?(name)
+          raise Error.new(50100, "Precision for #{name} not supported") unless %w[NUMERIC VARCHAR CHAR BINARY VARBINARY].include?(name)
+          if %w[BINARY VARBINARY].include?(name) && precision > 1_000_000_000
+            raise Error.new(90150, "Invalid binary precision")
+          end
         end
         Type.new(name, precision, scale)
       end
@@ -362,7 +370,10 @@ module H2
       end
 
       def table_primary
-        source = if accept("(")
+        source = if keyword?("VALUES")
+          take
+          DerivedSource.new(values)
+        elsif accept("(")
           nested = query_start? ? DerivedSource.new(query) : from_clause
           expect(")")
           nested
@@ -503,6 +514,12 @@ module H2
         when "NULL" then Literal.new(nil)
         when "TRUE" then Literal.new(true)
         when "FALSE" then Literal.new(false)
+        when "UUID"
+          if current.kind == :literal && current.value.is_a?(String) && !BinaryString.binary?(current.value)
+            Literal.new(UUIDValue.parse(take.value))
+          else
+            column_or_function(token)
+          end
         when "DEFAULT" then Default.new
         when "CASE"
           operand = keyword?("WHEN") ? nil : expression

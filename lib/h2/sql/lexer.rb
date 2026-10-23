@@ -49,7 +49,9 @@ module H2
       end
 
       def scan_token
-        if @scanner.scan(/[uU]&(?=['"])/)
+        if @scanner.scan(/[xX](?=')/)
+          [:literal, binary_literal]
+        elsif @scanner.scan(/[uU]&(?=['"])/)
           delimiter = @scanner.peek(1)
           raw = quoted(delimiter)
           escape = unicode_escape_character
@@ -68,6 +70,25 @@ module H2
         else
           raise Error.new(42000, "Unexpected character at byte #{@scanner.pos}: #{@scanner.getch.inspect}")
         end
+      end
+
+      def binary_literal
+        bytes = +"".b
+        loop do
+          digits = quoted("'").delete(" ")
+          raise Error.new(42000, "Quote inside binary literal") if digits.include?("'")
+          raise Error.new(90004, "Invalid hexadecimal string") unless digits.match?(/\A[0-9a-fA-F]*\z/)
+          raise Error.new(90003, "Odd hexadecimal string length") if digits.length.odd?
+
+          bytes << [digits].pack("H*")
+          position = @scanner.pos
+          skip_trivia
+          unless @scanner.peek(1) == "'"
+            @scanner.pos = position
+            break
+          end
+        end
+        bytes.freeze
       end
 
       def unicode_escape_character

@@ -44,6 +44,12 @@ class CLITest < Minitest::Test
     end
   end
 
+  def test_binary_bytes_and_uuid_have_printable_representations
+    output = StringIO.new
+    assert_equal 0, H2::CLI.new.run(["--execute", "SELECT X'00ff' AS b, UUID '01234567-89ab-cdef-0123-456789abcdef' AS u;"], output: output)
+    assert_equal "B\tU\nX'00ff'\t01234567-89ab-cdef-0123-456789abcdef\n(1 row)\n", output.string
+  end
+
   def test_error_exits_nonzero
     output, error, status = Open3.capture3(RbConfig.ruby, "-Ilib", "exe/h2", "--execute", "TABLE missing;")
     refute status.success?

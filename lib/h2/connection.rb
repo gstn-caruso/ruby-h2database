@@ -187,7 +187,7 @@ module H2
       values = parameters.map do |value|
         case value
         when String then value.dup.freeze
-        when nil, true, false, Integer, BigDecimal then value
+        when nil, true, false, Integer, BigDecimal, UUIDValue then value
         when Float
           raise Error.new(22018, "Non-finite parameter") unless value.finite?
 

@@ -11,11 +11,13 @@ abort "Build the Java reference first" unless File.file?(jar)
 java = ENV["JAVA_HOME"] ? File.join(ENV.fetch("JAVA_HOME"), "bin/java") : "java"
 oracle = [java, "-cp", jar, File.join(__dir__, "JdbcOracle.java")]
 decode = ->(value) { value.unpack1("m0").force_encoding(Encoding::UTF_8) }
-type_name = ->(name) { name.start_with?("ROW(") ? "ROW" : {"CHARACTER VARYING" => "VARCHAR", "CHARACTER" => "CHAR", "DOUBLE PRECISION" => "DOUBLE"}.fetch(name, name) }
+type_name = ->(name) { name.start_with?("ROW(") ? "ROW" : {"CHARACTER VARYING" => "VARCHAR", "CHARACTER" => "CHAR", "DOUBLE PRECISION" => "DOUBLE", "BINARY VARYING" => "VARBINARY"}.fetch(name, name) }
 normalize = lambda do |value, type|
   next nil if value.nil?
 
-  if %w[TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE].include?(type)
+  if %w[BINARY VARBINARY].include?(type)
+    value.unpack1("H*")
+  elsif %w[TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE].include?(type)
     BigDecimal(value.to_s).to_s("F")
   elsif [true, false].include?(value)
     value ? "TRUE" : "FALSE"
@@ -83,14 +85,27 @@ schema = [
   "CREATE TABLE target(v INT DEFAULT (SELECT MAX(v)+7 FROM source))", "INSERT INTO target DEFAULT VALUES",
   "CREATE TABLE rows_table AS SELECT ROW(1,'nested',ROW(TRUE,NULL)) AS pair",
   'CREATE TABLE "odd""table"("a""b" VARCHAR DEFAULT \'O\'\'Brien 😀\')',
-  'INSERT INTO "odd""table" DEFAULT VALUES'
+  'INSERT INTO "odd""table" DEFAULT VALUES',
+  "CREATE TABLE bytes(u UUID PRIMARY KEY, b BINARY(4) DEFAULT X'00ff', v VARBINARY(20) UNIQUE)",
+  "INSERT INTO bytes(u,v) VALUES('01234567-89ab-cdef-0123-456789abcdef',X'00ffeda080'),('ffffffff-ffff-ffff-ffff-ffffffffffff',X''),('00000000-0000-0000-0000-000000000000',NULL)",
+  "CREATE TABLE binary_defaults(u UUID DEFAULT UUID 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', b VARBINARY DEFAULT X'ff00', small VARBINARY DEFAULT CAST(-1 AS SMALLINT))",
+  "INSERT INTO binary_defaults DEFAULT VALUES",
+  "CREATE TABLE empty_binary(v VARBINARY) AS SELECT X''",
+  "CREATE TABLE binary_rows AS SELECT ROW(UUID '01234567-89ab-cdef-0123-456789abcdef',X'ff00') AS pair"
 ]
 queries = ["TABLE people ORDER BY id", "TABLE pairs ORDER BY a,b", "TABLE bag ORDER BY a NULLS LAST,b NULLS LAST",
-  "TABLE typed", "TABLE target", "TABLE rows_table", 'TABLE "odd""table"', "SELECT id FROM people WHERE name='Ada 😀'"]
+  "TABLE typed", "TABLE target", "TABLE rows_table", 'TABLE "odd""table"', "SELECT id FROM people WHERE name='Ada 😀'",
+  "TABLE bytes ORDER BY u", "TABLE binary_defaults", "SELECT u FROM bytes WHERE v=X'00ffeda080'",
+  "TABLE empty_binary", "TABLE binary_rows"]
 changes = ["UPDATE people SET amount=amount+1 WHERE id=-7", "INSERT INTO people(id,name) VALUES(20,'new')",
   "DELETE FROM bag WHERE a IS NULL", "UPDATE bag SET b='updated' WHERE a=1", "INSERT INTO bag VALUES(2,'later')",
   "UPDATE source SET v=20", "INSERT INTO target DEFAULT VALUES", "INSERT INTO pairs VALUES('b',3,'z')",
-  "INSERT INTO people VALUES(9,'duplicate',0,TRUE)", "INSERT INTO pairs VALUES('a',1,'dup')"]
+  "INSERT INTO people VALUES(9,'duplicate',0,TRUE)", "INSERT INTO pairs VALUES('a',1,'dup')",
+  "UPDATE bytes SET b=X'ff',v=X'80ff00' WHERE u='0123456789abcdef0123456789abcdef'",
+  "DELETE FROM bytes WHERE u=UUID 'ffffffff-ffff-ffff-ffff-ffffffffffff'",
+  "INSERT INTO bytes(u,v) VALUES('11111111-1111-1111-1111-111111111111',X'00')",
+  "INSERT INTO bytes(u,v) VALUES('22222222-2222-2222-2222-222222222222',X'80ff00')",
+  "INSERT INTO binary_defaults DEFAULT VALUES"]
 
 Dir.mktmpdir("sql-persistence-reference-") do |directory|
   [:none, :fast, :high].each do |compression|
@@ -110,6 +125,19 @@ Dir.mktmpdir("sql-persistence-reference-") do |directory|
   ruby_run.call(protected, ["CREATE TABLE t(v INT)", "INSERT INTO t VALUES(42)"], password: "sëcret 😀")
   assert.call(java_run.call(protected, ["TABLE t"], "sëcret 😀").first.fetch(:rows) == [["42.0"]], "Java rejected the native password hash")
   assert.call(ruby_run.call(protected, ["TABLE t"], password: "sëcret 😀", read_only: true).first.fetch(:rows) == [["42.0"]], "Native read-only password reopen differs")
+  inferred_empty = File.join(directory, "inferred-empty-native")
+  ruby_run.call(inferred_empty, ["CREATE TABLE empty_binary AS SELECT X'' AS v"])
+  assert.call(java_run.call(inferred_empty, ["TABLE empty_binary"]).first.fetch(:rows) == [[""]], "Java cannot reopen native inferred empty binary metadata")
+  invalid_empty = File.join(directory, "inferred-empty-java")
+  assert.call(java_run.call(invalid_empty, ["CREATE TABLE empty_binary AS SELECT X'' AS v"]).first == {update: 0}, "Java empty binary CTAS failed before reopen")
+  assert.call(java_run.call(invalid_empty, ["TABLE empty_binary"]).first[:error] == 42104, "Java zero-length binary metadata limitation changed")
+  begin
+    H2.connect(path: invalid_empty).close
+    abort "Native parser accepted Java's invalid zero-length column metadata"
+  rescue H2::Error => error
+    assert.call(error.code == 90008, "Native invalid zero-length metadata rejection differs")
+  end
+  puts "Reference limitation: Java saves inferred empty binary columns with precision 0, then omits the table on reopen; native files use precision 1"
   child = <<~'RUBY'
     require "h2"
     database = H2::Database.new(path: ARGV.fetch(0))

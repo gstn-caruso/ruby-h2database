@@ -36,7 +36,7 @@ module H2
         end
         case value.name
         when "NUMERIC" then "NUMERIC(#{value.precision || 100_000},#{value.scale || 0})"
-        when "VARCHAR", "CHAR" then value.precision ? "#{value.name}(#{value.precision})" : value.name
+        when "VARCHAR", "CHAR", "BINARY", "VARBINARY" then value.precision ? "#{value.name}(#{value.precision})" : value.name
         else value.name
         end
       end
@@ -47,7 +47,12 @@ module H2
         when true then "TRUE"
         when false then "FALSE"
         when String
-          [Encoding::UTF_16BE, Encoding::UTF_16LE].include?(value.encoding) ? unicode_quote(value, "'") : "'#{value.gsub("'", "''")}'"
+          if BinaryString.binary?(value)
+            "X'#{value.unpack1('H*')}'"
+          else
+            [Encoding::UTF_16BE, Encoding::UTF_16LE].include?(value.encoding) ? unicode_quote(value, "'") : "'#{value.gsub("'", "''")}'"
+          end
+        when UUIDValue then "UUID '#{value}'"
         when BigDecimal then value.to_s("F")
         when Integer then value.to_s
         when Float

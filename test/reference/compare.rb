@@ -20,11 +20,13 @@ abort error unless status.success?
 reference = output.split("END\n").map { it.lines.map(&:chomp) }
 abort "Java reference returned #{reference.length} results for #{statements.length} statements" unless reference.length == statements.length
 
-type_names = {"CHARACTER VARYING" => "VARCHAR", "CHARACTER" => "CHAR", "DOUBLE PRECISION" => "DOUBLE"}
+type_names = {"CHARACTER VARYING" => "VARCHAR", "CHARACTER" => "CHAR", "DOUBLE PRECISION" => "DOUBLE", "BINARY VARYING" => "VARBINARY"}
 normalize = lambda do |value, type|
   next nil if value.nil?
 
-  if %w[TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE].include?(type)
+  if %w[BINARY VARBINARY].include?(type)
+    value.unpack1("H*")
+  elsif %w[TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE].include?(type)
     BigDecimal(value.to_s).to_s("F")
   elsif value == true || value == false
     value ? "TRUE" : "FALSE"

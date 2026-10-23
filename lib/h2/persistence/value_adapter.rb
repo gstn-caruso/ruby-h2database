@@ -13,6 +13,8 @@ module H2
         data = if type.name == "NUMERIC"
           scale = type.scale || 0
           MVStore::Decimal.new((value * (10**scale)).to_i, scale)
+        elsif type.name == "UUID"
+          value.bytes
         else
           value
         end
