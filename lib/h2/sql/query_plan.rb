@@ -89,6 +89,7 @@ module H2
         when Binary, IntervalDifference then node.with(left: resolve_alias(node.left, aliases), right: resolve_alias(node.right, aliases))
         when Predicate, Function then node.with(arguments: node.arguments.map { resolve_alias(it, aliases) })
         when Cast then node.with(expression: resolve_alias(node.expression, aliases))
+        when TimeZoneExpression then node.with(expression: resolve_alias(node.expression, aliases), zone: node.zone && resolve_alias(node.zone, aliases))
         else node
         end
       end
@@ -182,7 +183,7 @@ module H2
           end
           input = input.to_a
           if !statement.group.empty?
-            input.group_by { |row| statement.group.map { evaluator.evaluate(it, row) } }.values
+            input.group_by { |row| statement.group.map { Temporal.comparison_key(evaluator.evaluate(it, row)) } }.values
           elsif @grouped
             [input]
           else
@@ -197,7 +198,7 @@ module H2
           projected = @projections.map { evaluator.evaluate(it.expression, row, group) }
           [projected, row, group]
         end
-        entries = entries.uniq(&:first) if statement.distinct
+        entries = entries.uniq { |entry| entry.first.map { Temporal.comparison_key(it) } } if statement.distinct
         entries = ordered(entries, @order, evaluator)
         entries = paginate(entries, statement.limit, statement.offset, outer_row) unless pagination_applied
         entries = entries.first(max_rows) if max_rows
@@ -256,6 +257,8 @@ module H2
       def expression(node, inside: false)
         case node
         when CurrentDateTime then node.name + (node.scale.nil? ? "" : "(#{node.scale})")
+        when TypedLiteral then expression(node.cast ? Cast.new(Literal.new(node.value), node.type) : Literal.new(node.value), inside: inside)
+        when TimeZoneExpression then "#{expression(node.expression, inside: true)} AT #{node.zone ? "TIME ZONE #{expression(node.zone, inside: true)}" : 'LOCAL'}"
         when BoundColumn then node.binding.name
         when ColumnRef then inside && node.qualifier ? "#{node.qualifier}.#{node.name}" : node.name
         when Literal
@@ -266,7 +269,7 @@ module H2
           when String then BinaryString.binary?(node.value) ? "X'#{node.value.unpack1('H*')}'" : "'#{node.value.gsub("'", "''")}'"
           when UUIDValue then "UUID '#{node.value}'"
           when IntervalValue then node.value.to_s
-          when DateValue, TimeValue, TimestampValue then "#{Temporal.name(node.value)} '#{node.value}'"
+          when DateValue, TimeValue, TimestampValue, TimeTimeZoneValue, TimestampTimeZoneValue then "#{Temporal.name(node.value)} '#{node.value}'"
           when BigDecimal then node.value.to_s("F")
           else node.value.to_s
           end
@@ -288,7 +291,9 @@ module H2
           name = type.name == "VARBINARY" ? "BINARY VARYING" : type.name
           name = Intervals.sql(type) if Intervals.name?(type.name)
           name += "(#{type.precision})" if %w[BINARY VARBINARY].include?(type.name) && type.precision
-          name += "(#{type.scale})" if %w[TIME TIMESTAMP].include?(type.name) && type.scale != (type.name == "TIME" ? 0 : 6)
+          if Temporal::NAMES.include?(type.name) && type.name != "DATE" && type.scale != (Temporal.time_type?(type.name) ? 0 : 6)
+            name = name.sub(/\A(TIMESTAMP|TIME)/) { "#{it}(#{type.scale})" }
+          end
           if type.name == "NUMERIC" && type.precision && [type.precision, type.scale] != [100_000, 0]
             name += "(#{type.precision}#{type.scale.to_i.zero? ? '' : ", #{type.scale}"})"
           end

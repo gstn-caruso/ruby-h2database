@@ -31,7 +31,7 @@ module H2
         when ColumnRef
           binding = scope.resolve(node)
           @outer_bindings << binding unless scope.local?(binding) || @outer_bindings.include?(binding)
-        when Literal, Parameter, BoundColumn, CurrentDateTime
+        when Literal, TypedLiteral, Parameter, BoundColumn, CurrentDateTime
           nil
         when CaseExpression
           expression, _type = prepared_case(node)
@@ -62,7 +62,7 @@ module H2
             end
             validate(argument, aggregates: aggregates, inside_aggregate: inside_aggregate || aggregate)
           end
-          if %w[SUM AVG].include?(node.name) && %w[BINARY VARBINARY UUID DATE TIME TIMESTAMP].include?(type_of(node.arguments.first)&.name)
+          if %w[SUM AVG].include?(node.name) && (%w[BINARY VARBINARY UUID] + Temporal::NAMES).include?(type_of(node.arguments.first)&.name)
             raise Error.new(90015, "Invalid type for #{node.name}")
           end
           function_type(node) if datetime_function?(node)
@@ -70,7 +70,7 @@ module H2
           raise Error.new(42000, "Invalid expression #{node.class.name.split('::').last}")
         else
           children(node).each { validate(it, aggregates: aggregates, inside_aggregate: inside_aggregate) }
-          if node.is_a?(IntervalDifference)
+          if node.is_a?(IntervalDifference) || node.is_a?(TimeZoneExpression)
             type_of(node)
           elsif node.is_a?(Binary) && %w[= <> != < > <= >=].include?(node.operator)
             Type.check_comparable(type_of(node.left), type_of(node.right))
@@ -100,6 +100,16 @@ module H2
 
       def session_dependent?(node)
         return true if node.is_a?(CurrentDateTime)
+        if node.is_a?(TimeZoneExpression)
+          return true if node.zone.nil? || !type_of(node.expression).name.end_with?("WITH TIME ZONE")
+        end
+        if node.is_a?(Function) && %w[EXTRACT DATEDIFF].include?(node.name) && node.arguments.first.value.start_with?("TIMEZONE_")
+          return true if node.arguments.drop(1).any? { !type_of(it).name.end_with?("WITH TIME ZONE") }
+        end
+        if node.is_a?(Cast) && %w[TIME TIMESTAMP].include?(node.type.name) && node.expression.is_a?(Literal) &&
+            node.expression.value.is_a?(String) && node.expression.value.match?(/\d(?:Z|[+-]\d| [A-Za-z])/)
+          return true
+        end
         if node.is_a?(Cast) && session_date_conversion?(node.type, type_of(node.expression))
           return true
         end
@@ -121,7 +131,7 @@ module H2
         end
         if node.is_a?(IntervalDifference) && IntervalUnits.year_month?(IntervalUnits.ordinal(Intervals.qualifier(node.type)))
           names = [type_of(node.left).name, type_of(node.right).name]
-          return true if names.include?("TIME") && names.uniq.length > 1
+          return true if names.any? { Temporal.time_type?(it) } && !names.all? { Temporal.time_type?(it) }
         end
         children(node).any? { session_dependent?(it) }
       end
@@ -167,10 +177,14 @@ module H2
       def evaluate(node, row = {}, group = nil)
         case node
         when Literal then node.value
+        when TypedLiteral then node.value
         when CurrentDateTime
           raise Error.new(50100, "Current-clock function requires a SQL session context") unless context
 
           type_of(node).convert(context.current_timestamp, context: context)
+        when TimeZoneExpression
+          TimeZoneOperations.evaluate(evaluate(node.expression, row, group), type_of(node),
+            node.zone && evaluate(node.zone, row, group), context: context, local: node.zone.nil?)
         when Parameter
           value = @parameters.fetch(node.index)
           value.equal?(UNBOUND_PARAMETER) ? nil : value
@@ -284,9 +298,12 @@ module H2
 
       def type_of(node)
         case node
+        when TypedLiteral then node.type
         when CurrentDateTime
-          name = {"CURRENT_DATE" => "DATE", "LOCALTIME" => "TIME", "LOCALTIMESTAMP" => "TIMESTAMP"}.fetch(node.name)
+          name = {"CURRENT_DATE" => "DATE", "LOCALTIME" => "TIME", "LOCALTIMESTAMP" => "TIMESTAMP",
+            "CURRENT_TIME" => "TIME WITH TIME ZONE", "CURRENT_TIMESTAMP" => "TIMESTAMP WITH TIME ZONE"}.fetch(node.name)
           Temporal.type(name, node.scale)
+        when TimeZoneExpression then TimeZoneOperations.type(type_of(node.expression))
         when ColumnRef then scope.resolve(node).type
         when BoundColumn then node.binding.type
         when Cast then node.type
@@ -322,6 +339,7 @@ module H2
           when DateValue then Temporal.type("DATE")
           when TimeValue then Temporal.type("TIME", 9)
           when TimestampValue then Temporal.type("TIMESTAMP", 9)
+          when TimeTimeZoneValue, TimestampTimeZoneValue then Temporal.type(Temporal.name(node.value), 9)
           when IntervalValue then Intervals.type(node.value.qualifier, 18, 9)
           when true, false then Type.new("BOOLEAN", nil, nil)
           when nil then Type.new("NULL", nil, nil)
@@ -355,6 +373,7 @@ module H2
         when Binary, IntervalDifference then [node.left, node.right]
         when Predicate, Function then node.arguments
         when Cast then [node.expression]
+        when TimeZoneExpression then [node.expression, node.zone].compact
         when RowConstructor then node.expressions
         when CaseExpression
           expression = prepared_case(node).first
@@ -368,6 +387,10 @@ module H2
       end
 
       def optimized_expression(node)
+        if node.is_a?(TimeZoneExpression) && constant?(node)
+          value = evaluate(node)
+          return value.nil? ? node : Literal.new(value)
+        end
         if node.is_a?(Cast) && Intervals.name?(node.type.name) && constant?(node.expression)
           return node.with(expression: Literal.new(evaluate(node)))
         end
@@ -395,7 +418,16 @@ module H2
           fields = source.is_a?(RowType) ? source.fields : [source]
           return target.fields.zip(fields).any? { session_date_conversion?(*it) }
         end
-        target.name == "TIMESTAMP" && source.name == "TIME"
+        return false unless Temporal::NAMES.include?(target.name)
+        return true if target.name != "DATE" && %w[CHAR VARCHAR].include?(source.name)
+        case target.name
+        when "DATE" then source.name == "TIMESTAMP WITH TIME ZONE"
+        when "TIME" then ["TIME WITH TIME ZONE", "TIMESTAMP WITH TIME ZONE"].include?(source.name)
+        when "TIMESTAMP" then ["TIME", "TIME WITH TIME ZONE", "TIMESTAMP WITH TIME ZONE"].include?(source.name)
+        when "TIME WITH TIME ZONE" then %w[TIME TIMESTAMP].include?(source.name)
+        when "TIMESTAMP WITH TIME ZONE" then (Temporal::NAMES - [target.name]).include?(source.name)
+        else false
+        end
       end
 
       def session_date_comparison?(nodes)
@@ -444,7 +476,7 @@ module H2
         [node.operand, *node.branches.flatten, node.fallback].compact
       end
 
-      def prepared_case(node)
+      public def prepared_case(node)
         @cases.fetch(node) do
           validate(node.operand, aggregates: true) if node.operand
           all_constant = !node.operand || constant?(node.operand)
@@ -454,7 +486,7 @@ module H2
             validate(condition, aggregates: true)
             validate(value, aggregates: true) unless node.operand
             if all_constant
-              if constant?(condition) && (!node.operand || !session_date_comparison?([node.operand, condition]))
+              if constant?(condition)
                 candidate = evaluate(condition)
                 matched = node.operand ? equals(operand, candidate) == true : boolean(candidate) == true
                 if matched
@@ -483,7 +515,8 @@ module H2
         return false if session_dependent?(node)
 
         case node
-        when Literal then true
+        when Literal, TypedLiteral then true
+        when TimeZoneExpression then !node.zone.nil? && children(node).all? { constant?(it) }
         when Subquery then subquery_plan(node).constant?
         when Unary, Binary, IntervalDifference, Predicate, Cast, RowConstructor then children(node).all? { constant?(it) }
         when Function then FUNCTIONS.key?(node.name) && !AGGREGATES.include?(node.name) && children(node).all? { constant?(it) }
@@ -548,6 +581,7 @@ module H2
         when Binary, IntervalDifference then node.with(left: canonical(node.left), right: canonical(node.right))
         when Predicate, Function then node.with(arguments: node.arguments.map { canonical(it) })
         when Cast then node.with(expression: canonical(node.expression))
+        when TimeZoneExpression then node.with(expression: canonical(node.expression), zone: node.zone && canonical(node.zone))
         when RowConstructor then node.with(expressions: node.expressions.map { canonical(it) })
         when CaseExpression
           node.with(operand: node.operand && canonical(node.operand),
@@ -635,10 +669,10 @@ module H2
         if %w[+ - * / %].include?(node.operator)
           left_type, right_type = type_of(node.left), type_of(node.right)
           if IntervalOperations.applicable?(node.operator, left_type, right_type)
-            return IntervalOperations.evaluate(node.operator, left, right, left_type, right_type)
+            return IntervalOperations.evaluate(node.operator, left, right, left_type, right_type, context: context)
           end
           if [left_type, right_type].any? { Temporal::NAMES.include?(it&.name) }
-            return TemporalOperations.evaluate(node.operator, left, right, left_type, right_type)
+            return TemporalOperations.evaluate(node.operator, left, right, left_type, right_type, context: context)
           end
         end
         if %w[= <> != < > <= >=].include?(node.operator) && (left.is_a?(RowValue) ^ right.is_a?(RowValue))
@@ -757,8 +791,8 @@ module H2
           return first
         end
         return nil if values.any?(&:nil?)
-        return DateTimeFunctions.evaluate(node.name, *values) if DateTimeFunctions::NAMES.include?(node.name)
-        return CalendarFunctions.evaluate(node.name, *values) if CalendarFunctions::NAMES.include?(node.name)
+        return DateTimeFunctions.evaluate(node.name, *values, context: context) if DateTimeFunctions::NAMES.include?(node.name)
+        return CalendarFunctions.evaluate(node.name, *values, context: context) if CalendarFunctions::NAMES.include?(node.name)
 
         case node.name
         when "UPPER", "UCASE" then BinaryString.text(first).upcase.freeze
@@ -788,7 +822,7 @@ module H2
         return group.size if argument.is_a?(Star)
 
         values = group.map { evaluate(argument, it) }.compact
-        values = values.uniq if node.distinct
+        values = values.uniq { Temporal.comparison_key(it) } if node.distinct
         return values.length if node.name == "COUNT"
         return nil if values.empty?
         if %w[SUM AVG].include?(node.name) && Intervals.name?(type_of(argument).name)

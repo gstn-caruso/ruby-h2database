@@ -24,10 +24,15 @@ module H2
           value.nanos
         elsif type.name == "TIMESTAMP"
           [value.date.packed, value.time.nanos]
+        elsif type.name == "TIME WITH TIME ZONE"
+          [value.nanos, value.offset_seconds]
+        elsif type.name == "TIMESTAMP WITH TIME ZONE"
+          [value.date.packed, value.time.nanos, value.offset_seconds]
         else
           value
         end
-        MVStore::Value.new(type.name.downcase.to_sym, data)
+        kind = {"TIME WITH TIME ZONE" => :time_tz, "TIMESTAMP WITH TIME ZONE" => :timestamp_tz}.fetch(type.name) { type.name.downcase.to_sym }
+        MVStore::Value.new(kind, data)
       end
 
       def decode(value, type)
@@ -42,6 +47,8 @@ module H2
         when :date then DateValue.from_packed(value.data)
         when :time then TimeValue.new(value.data)
         when :timestamp then TimestampValue.new(DateValue.from_packed(value.data[0]), TimeValue.new(value.data[1]))
+        when :time_tz then TimeTimeZoneValue.new(*value.data)
+        when :timestamp_tz then TimestampTimeZoneValue.new(DateValue.from_packed(value.data[0]), TimeValue.new(value.data[1]), value.data[2])
         when :interval then IntervalValue.new(IntervalUnits::QUALIFIERS.fetch(value.data[0]), *value.data.drop(1))
         else value.to_ruby
         end

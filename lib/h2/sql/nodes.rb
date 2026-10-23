@@ -4,7 +4,9 @@ module H2
   module SQL
     UNBOUND_PARAMETER = Object.new.freeze
     Literal = Data.define(:value)
+    TypedLiteral = Data.define(:value, :type, :cast)
     CurrentDateTime = Data.define(:name, :scale)
+    TimeZoneExpression = Data.define(:expression, :zone)
     Parameter = Data.define(:index)
     ColumnRef = Data.define(:name, :qualifier)
     BoundColumn = Data.define(:binding)
@@ -43,5 +45,6 @@ module H2
     Delete = Data.define(:table, :where)
     Transaction = Data.define(:operation, :name)
     SetAutocommit = Data.define(:value)
+    SetTimeZone = Data.define(:expression)
   end
 end
