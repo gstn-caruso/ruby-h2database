@@ -177,6 +177,14 @@ Arithmetic supports `+`, `-`, `*`, `/`, `%`, `ABS`, `SIGN` and `MOD`, including 
 
 Columns, CTAS, key indexes, arrays and dynamic arithmetic/aggregate defaults retain values and operand precision across native/JDBC file reopen. Remaining numeric functions, aliases, conversions and full metadata/optimizer behavior are still migration work.
 
+## Numeric declarations and conversions
+
+`NUMERIC(p,s)`, `DECIMAL` / `DEC`, and `NUMBER(p,s)` support precision 1–100,000 and scale 0–100,000, including scale greater than precision. Bare `NUMBER` means `DECFLOAT(40)`. `FLOAT(p)` chooses REAL for 1–24 binary digits and DOUBLE for 25–53; bare `FLOAT` means DOUBLE. Declarations and defaults survive native/JDBC reopen. Scalar type records expose the physical family with `.name` and the metadata name with `.type_name`, which retains `DECIMAL`.
+
+Character conversions use H2's numeric syntax: integer/decimal text accepts BMP Unicode decimal digits; floating-point text accepts decimal/hexadecimal exponents and Java's `f`/`d` suffixes. Digit separators in character input are rejected. Text integer overflow raises 22018; numeric integer overflow raises 22003. Conversion to REAL rounds directly to 32 bits from exact input, avoiding an intermediate DOUBLE rounding. Numeric-to-character conversion retains decimal scale and REAL width; numeric NaN converts to boolean false.
+
+Native floating-point text follows the modern Java reference. Java 17 prints some values with extra digits; [MIGRATION.md](MIGRATION.md) records separately checked formatting differences and exact-bit comparisons. Compatibility modes, other aliases/conversions and complete metadata remain pending.
+
 ## Rounding numbers and truncating dates
 
 `ROUND(value[, scale])` rounds decimal ties away from zero. `TRUNC` / `TRUNCATE` discard the fractional part toward zero; `FLOOR` rounds down and `CEIL` / `CEILING` round up. A negative scale selects digits before the decimal point. Scales range from -100,000 to 100,000; invalid scales raise 90008, and integer overflow raises 22003.

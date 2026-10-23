@@ -14,7 +14,10 @@ module H2
       end
       return Intervals.sql(type) if Intervals.name?(type.name)
 
-      name = ALIASES.fetch(type.name, type.name)
+      name = type.declared_name || ALIASES.fetch(type.name, type.name)
+      if type.declared_name == "FLOAT"
+        return name + (type.declared_precision ? "(#{type.declared_precision})" : '')
+      end
       if type.name == "JSON" && type.precision && type.precision != JsonValue::MAX_PRECISION
         name += "(#{type.precision})"
       elsif type.name == "DECFLOAT" && type.precision && type.precision != 100_000
@@ -23,6 +26,8 @@ module H2
         name += "(#{type.precision})"
       elsif type.name == "NUMERIC" && !type.declared_scale.nil?
         name += "(#{type.precision || 100_000}, #{type.declared_scale})"
+      elsif type.name == "NUMERIC" && type.declared_precision
+        name += "(#{type.declared_precision})"
       elsif type.name == "NUMERIC" && type.precision && [type.precision, type.scale] != [100_000, 0]
         name += "(#{type.precision}#{type.scale.to_i.zero? ? '' : ", #{type.scale}"})"
       elsif Temporal::NAMES.include?(type.name) && type.name != "DATE" && type.scale != (Temporal.time_type?(type.name) ? 0 : 6)

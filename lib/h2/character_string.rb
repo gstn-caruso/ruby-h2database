@@ -4,6 +4,22 @@ module H2
   module CharacterString
     module_function
 
+    def sql(value)
+      points = sort_key(value).force_encoding(Encoding::UTF_16BE)
+      points = points.valid_encoding? ? points.encode(Encoding::UTF_8).codepoints : points.unpack('n*')
+      return "'#{points.pack('U*').gsub("'", "''")}'" if points.all? { (32..127).cover?(it) }
+
+      body = points.map do |point|
+        if (32...127).cover?(point)
+          character = point.chr
+          [39, 92].include?(point) ? character * 2 : character
+        elsif point <= 0xffff then "\\#{point.to_s(16).rjust(4,'0')}"
+        else "\\+#{point.to_s(16).rjust(6,'0')}"
+        end
+      end.join
+      "U&'#{body}'"
+    end
+
     def sort_key(value)
       case value.encoding
       when Encoding::UTF_16BE then value.b

@@ -17,8 +17,9 @@ normalize = lambda do |value, type|
 
   if %w[BINARY VARBINARY].include?(type)
     value.unpack1("H*")
-  elsif %w[TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE].include?(type)
-    BigDecimal(value.to_s).to_s("F")
+  elsif %w[TINYINT SMALLINT INTEGER BIGINT NUMERIC DECIMAL REAL DOUBLE].include?(type)
+    text = type == "REAL" && value.is_a?(Float) ? H2::JsonValue.float_text(value, real: true) : value.to_s
+    BigDecimal(text).to_s("F")
   elsif [true, false].include?(value)
     value ? "TRUE" : "FALSE"
   else
@@ -52,7 +53,7 @@ ruby_run = lambda do |path, statements, **options|
       begin
         result = connection.execute(sql)
         if result.query?
-          types = result.types.map { type_name.call(it.name) }
+          types = result.types.map { type_name.call(it.respond_to?(:type_name) ? it.type_name : it.name) }
           {columns: result.columns, types: types, rows: result.rows.map { |row| row.each_with_index.map { |value, index| normalize.call(value, types[index]) } }}
         else
           {update: result.update_count}
@@ -226,6 +227,16 @@ schema.concat([
 ])
 queries.concat(["TABLE rounding_saved ORDER BY n", "TABLE rounding_results", "SELECT ROUND(n,s) AS r,TRUNC(n,s) AS t FROM rounding_source"])
 changes.concat(["UPDATE rounding_source SET n=-1.255,s=1,d=DATE '2001-03-04',z=TIMESTAMP WITH TIME ZONE '2001-03-04 01:02:03-05'", "INSERT INTO rounding_saved DEFAULT VALUES"])
+
+schema.concat([
+  "CREATE TABLE numeric_aliases(n NUMBER DEFAULT '1e100',d DECIMAL(8,2) DEFAULT '1.20',r FLOAT(7) DEFAULT '1.0000000596046448',f FLOAT(25) DEFAULT '0x1.8p1',i BIGINT DEFAULT '１２٣')",
+  "INSERT INTO numeric_aliases DEFAULT VALUES",
+  "CREATE TABLE numeric_alias_copy AS SELECT n,d,r,f,i FROM numeric_aliases"
+])
+queries.concat(["TABLE numeric_aliases ORDER BY i", "TABLE numeric_alias_copy ORDER BY i",
+  "SELECT CAST(r AS VARCHAR) AS r,CAST(d AS VARCHAR) AS d,CAST(f AS REAL) AS f FROM numeric_aliases ORDER BY i"])
+changes.concat(["INSERT INTO numeric_aliases DEFAULT VALUES", "INSERT INTO numeric_aliases(i,r) VALUES('١٢٤','7.006492321624086e-46')",
+  "UPDATE numeric_aliases SET d='2.345',f='0.5f' WHERE i=123", "INSERT INTO numeric_alias_copy SELECT * FROM numeric_aliases"])
 
 intervals = [
   ["YEAR", "1"], ["MONTH", "2"], ["DAY", "3"], ["HOUR", "4"], ["MINUTE", "5"], ["SECOND", "6.123456789"],

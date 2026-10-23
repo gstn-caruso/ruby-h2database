@@ -45,7 +45,7 @@ module H2
     def self.float_text(value, real: false)
       return value.to_s unless value.finite?
 
-      text = real ? (1..9).lazy.map { format("%.#{it}g", value) }.find { [it.to_f].pack('f') == [value].pack('f') } : value.to_s
+      text = real ? (2..9).lazy.map { format("%.#{it}g", value) }.find { [it.to_f].pack('f') == [value].pack('f') } : value.to_s
       number = BigDecimal(text)
       if !number.zero? && (number.abs >= 10_000_000 || number.abs < BigDecimal('0.001'))
         sign, digits, _base, exponent = number.split
