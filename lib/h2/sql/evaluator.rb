@@ -45,6 +45,8 @@ module H2
           plan.outer_bindings.each do |binding|
             @outer_bindings << binding unless scope.local?(binding) || @outer_bindings.include?(binding)
           end
+        when WhenPredicate
+          validate(node.predicate, aggregates: aggregates, inside_aggregate: inside_aggregate)
         when Function, Aggregate
           arity = FUNCTIONS[node.name]
           raise Error.new(50100, "Function #{node.name} not yet ported") unless arity
@@ -129,7 +131,7 @@ module H2
         if node.is_a?(Function) && %w[COALESCE IFNULL].include?(node.name)
           return true if node.arguments.any? { session_date_conversion?(function_type(node), type_of(it)) }
         elsif node.is_a?(CaseExpression)
-          if node.operand && node.branches.any? { |condition, _value| session_date_comparison?([node.operand, condition]) }
+          if node.operand && node.branches.any? { |condition, _value| !condition.is_a?(WhenPredicate) && session_date_comparison?([node.operand, condition]) }
             return true
           end
           expression, type = prepared_case(node)
@@ -141,6 +143,8 @@ module H2
           return true if session_date_comparison?(node.arguments)
         elsif node.is_a?(Function) && node.name == "NULLIF"
           return true if session_date_comparison?(node.arguments)
+        elsif node.is_a?(QuantifiedArray)
+          return true if quantified_session_dependent?(node)
         end
         if node.is_a?(IntervalDifference) && IntervalUnits.year_month?(IntervalUnits.ordinal(Intervals.qualifier(node.type)))
           names = [type_of(node.left).name, type_of(node.right).name]
@@ -239,26 +243,15 @@ module H2
           plan = subquery_plan(node)
           plan.constant? ? constant_subquery(node, plan) : scalar_value(plan, row)
         when Exists then !subquery_plan(node).execute(row, max_rows: 1).rows.empty?
-        when InQuery
-          value = evaluate(node.expression, row, group)
-          plan = subquery_plan(node)
-          values = plan.execute(row).rows.map { it.length == 1 ? it.first : RowValue.new(it) }
-          return false if values.empty?
-          return nil if contains_null?(value)
-          if plan.columns.length == 1 && value.is_a?(RowValue)
-            value = value.values.first
-          end
-          return true if values.any? { equals(value, it) == true }
-
-          values.any? { contains_null?(it) } ? nil : false
+        when InQuery then quantified_query(node, row, group)
+        when QuantifiedArray then quantified_array(node, row, group)
         when CaseExpression
           expression, type = prepared_case(node)
           return type.convert(evaluate(expression, row, group), cast: true, context: context) unless expression.is_a?(CaseExpression)
 
           operand = evaluate(expression.operand, row, group) if expression.operand
           branch = expression.branches.find do |condition, _value|
-            candidate = evaluate(condition, row, group)
-            expression.operand ? equals(operand, candidate) == true : boolean(candidate) == true
+            expression.operand ? case_match?(operand, condition, row, group) : boolean(evaluate(condition, row, group)) == true
           end
           value = evaluate(branch ? branch.last : expression.fallback, row, group)
           type.convert(value, cast: true, context: context)
@@ -268,6 +261,20 @@ module H2
 
       def boolean(value)
         Type.new("BOOLEAN", nil, nil).convert(value)
+      end
+
+      def case_match?(operand, condition, row = {}, group = nil)
+        return equals(operand, evaluate(condition, row, group)) == true unless condition.is_a?(WhenPredicate)
+
+        node = condition.predicate
+        result = case node
+        when InQuery then quantified_query(node, row, group, operand)
+        when QuantifiedArray then quantified_array(node, row, group, operand)
+        when Binary then evaluate(node.with(left: TypedLiteral.new(operand, type_of(node.left), false)), row, group)
+        when Predicate
+          evaluate(node.with(arguments: [TypedLiteral.new(operand, type_of(node.arguments.first), false), *node.arguments.drop(1)]), row, group)
+        end
+        result == true
       end
 
       def compare(left, right, untyped: false)
@@ -394,7 +401,7 @@ module H2
         when Subquery
           plan = subquery_plan(node)
           plan.constant? && constant_subquery(node, plan).nil? ? Type.new("NULL", nil, nil) : query_type(plan)
-        when Exists, InQuery then Type.new("BOOLEAN", nil, nil)
+        when Exists, InQuery, QuantifiedArray, WhenPredicate then Type.new("BOOLEAN", nil, nil)
         when CaseExpression then prepared_case(node).last
         when Parameter
           value = @parameters.fetch(node.index)
@@ -461,6 +468,8 @@ module H2
         when TimeZoneExpression then [node.expression, node.zone].compact
         when RowConstructor, ArrayConstructor then node.expressions
         when ArrayElement then [node.array, node.index]
+        when QuantifiedArray then [node.expression, node.array]
+        when WhenPredicate then [node.predicate]
         when CaseExpression
           expression = prepared_case(node).first
           expression.is_a?(CaseExpression) ? case_children(expression) : [expression]
@@ -473,6 +482,10 @@ module H2
       end
 
       def optimized_expression(node)
+        if node.is_a?(QuantifiedArray) && constant?(node)
+          value = evaluate(node)
+          return TypedLiteral.new(value, Type.new("BOOLEAN", nil, nil), value.nil?)
+        end
         if node.is_a?(Aggregate)
           return node.with(arguments: node.arguments.map { optimized_expression(it) }, order: aggregate_order(node))
         end
@@ -522,6 +535,42 @@ module H2
 
       private
 
+      def quantified_array(node, row, group, value = evaluate(node.expression, row, group))
+        array = evaluate(node.array, row, group)
+        return nil if array.nil?
+
+        values = array.is_a?(ArrayValue) ? array.values : [array]
+        right_type = array.is_a?(ArrayValue) ? array.element_type : type_of(node.array)
+        QuantifiedComparisons.evaluate(value, values, node.operator, node.all, self, type_of(node.expression), right_type)
+      end
+
+      def quantified_query(node, row, group, value = evaluate(node.expression, row, group))
+        plan = subquery_plan(node)
+        rows = plan.distinct_if_possible(row)
+        result = if node.operator == "=" && !node.all
+          query_membership(value, rows, plan, type_of(node.expression))
+        else
+          values = rows.map { value.is_a?(RowValue) || it.length != 1 ? RowValue.new(it) : it.first }
+          QuantifiedComparisons.evaluate(value, values, node.operator, node.all, self, type_of(node.expression), query_type(plan))
+        end
+        result.nil? ? nil : (node.negated ? !result : result)
+      end
+
+      def query_membership(value, rows, plan, left_type)
+        return false if rows.empty?
+        return nil if contains_null?(value)
+        return nil if plan.types.length == 1 && plan.types.first.name == "NULL"
+
+        if plan.columns.length == 1 && value.is_a?(RowValue)
+          value = value.values.first
+          left_type = left_type.fields.first if left_type.is_a?(RowType)
+        end
+        values = rows.map { it.length == 1 ? it.first : RowValue.new(it) }
+        return true if values.any? { QuantifiedComparisons.compare(value, it, "IS NOT DISTINCT FROM", self, left_type, query_type(plan)) }
+
+        values.any? { contains_null?(it) } ? nil : false
+      end
+
       def session_date_conversion?(target, source)
         return false unless target && source
         if target.is_a?(RowType)
@@ -550,6 +599,15 @@ module H2
           target = Type.check_comparable(*types)
           types.any? { session_date_conversion?(target, it) }
         end
+      end
+
+      def quantified_session_dependent?(node)
+        left, right = type_of(node.expression), type_of(node.array)
+        right = right.element_type if right.is_a?(ArrayType)
+        target = Type.common([left, right])
+        [left, right].any? { session_date_conversion?(target, it) }
+      rescue Error
+        false
       end
 
       def datetime_function?(node)
@@ -631,7 +689,7 @@ module H2
         when Literal, TypedLiteral, DecimalLiteral then true
         when TimeZoneExpression then !node.zone.nil? && children(node).all? { constant?(it) }
         when Subquery then subquery_plan(node).constant?
-        when Unary, Binary, IntervalDifference, Predicate, Cast, RowConstructor, ArrayConstructor, ArrayElement then children(node).all? { constant?(it) }
+        when Unary, Binary, IntervalDifference, Predicate, Cast, RowConstructor, ArrayConstructor, ArrayElement, QuantifiedArray then children(node).all? { constant?(it) }
         when Function then FUNCTIONS.key?(node.name) && !AGGREGATES.include?(node.name) && children(node).all? { constant?(it) }
         when CaseExpression
           expression = prepared_case(node).first
@@ -640,7 +698,7 @@ module H2
         end
       end
 
-      def contains_null?(value)
+      public def contains_null?(value)
         value.nil? || ([RowValue, ArrayValue].any? { value.is_a?(it) } && value.values.any? { contains_null?(it) })
       end
 
@@ -707,6 +765,8 @@ module H2
         when TimeZoneExpression then node.with(expression: canonical(node.expression), zone: node.zone && canonical(node.zone))
         when RowConstructor, ArrayConstructor then node.with(expressions: node.expressions.map { canonical(it) })
         when ArrayElement then node.with(array: canonical(node.array), index: canonical(node.index))
+        when QuantifiedArray then node.with(expression: canonical(node.expression), array: canonical(node.array))
+        when WhenPredicate then node.with(predicate: canonical(node.predicate))
         when CaseExpression
           node.with(operand: node.operand && canonical(node.operand),
             branches: node.branches.map { |condition, value| [canonical(condition), canonical(value)] }, fallback: canonical(node.fallback))

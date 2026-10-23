@@ -223,4 +223,14 @@ class SessionTemporalTest < DatabaseTest
     assert_sql_error 90110, "SELECT CASE DATE '2000-01-01' WHEN TIME '00:00:00' THEN 1 ELSE 2 END WHERE FALSE"
     assert_equal [[nil]], rows("SELECT NULL IN(DATE '2000-01-01',TIME '00:00:00')")
   end
+
+  def test_quantified_temporal_defaults_freeze_literals_and_keep_bindings_dynamic
+    with_clock do |advance|
+      execute("CREATE TABLE quantified_clock(frozen BOOLEAN DEFAULT TIME '12:00:00'=ANY(ARRAY[TIMESTAMP '2000-02-28 12:00:00']),dynamic BOOLEAN DEFAULT ?=ANY(ARRAY[TIMESTAMP '2000-02-28 12:00:00']),chosen INT DEFAULT CASE TIME '12:00:00' WHEN =ANY(ARRAY[TIMESTAMP '2000-02-28 12:00:00']) THEN 1 ELSE 2 END)", H2::TimeValue.parse("12:00:00"))
+      execute("INSERT INTO quantified_clock DEFAULT VALUES")
+      advance.call(Time.new(2000, 2, 29, 1, 2, 3))
+      execute("INSERT INTO quantified_clock DEFAULT VALUES")
+      assert_equal [[true, true, 1], [true, false, 2]], rows("TABLE quantified_clock")
+    end
+  end
 end

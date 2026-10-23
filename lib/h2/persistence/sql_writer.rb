@@ -120,7 +120,17 @@ module H2
         when SQL::ArrayQuery then "ARRAY(#{query(node.query, parameters: parameters, ctes: ctes)})"
         when SQL::Subquery then "(#{query(node.query, parameters: parameters, ctes: ctes)})"
         when SQL::Exists then "EXISTS(#{query(node.query, parameters: parameters, ctes: ctes)})"
-        when SQL::InQuery then "(#{render.call(node.expression)} IN(#{query(node.query, parameters: parameters, ctes: ctes)}))"
+        when SQL::InQuery
+          body = "#{render.call(node.expression)} #{node.operator} #{node.all ? 'ALL' : 'ANY'}(#{query(node.query, parameters: parameters, ctes: ctes)})"
+          "(#{node.negated ? 'NOT (' + body + ')' : body})"
+        when SQL::QuantifiedArray
+          "(#{render.call(node.expression)} #{node.operator} #{node.all ? 'ALL' : 'ANY'}(#{render.call(node.array)}))"
+        when SQL::WhenPredicate
+          predicate = node.predicate
+          first = predicate.is_a?(SQL::Binary) ? predicate.left : (predicate.is_a?(SQL::Predicate) ? predicate.arguments.first : predicate.expression)
+          text = render.call(predicate)
+          text = text[1...-1] if text.start_with?("(") && text.end_with?(")")
+          text.delete_prefix(render.call(first)).lstrip
         when SQL::CaseExpression
           sql = "CASE" + (node.operand ? " #{render.call(node.operand)}" : "")
           node.branches.each { |condition, value| sql += " WHEN #{render.call(condition)} THEN #{render.call(value)}" }
