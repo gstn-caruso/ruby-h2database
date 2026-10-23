@@ -117,6 +117,8 @@ The initial subset includes typed literals, component casts, comparisons, orderi
 
 `DATEADD(field, count, value)` (also `TIMESTAMPADD`) adds calendar units while clamping month/year changes to the last valid day. For example, `DATEADD(month, 1, DATE '2000-01-31')` returns `2000-02-29`. Subday units preserve nanoseconds, wrap TIME within its day, and promote DATE to TIMESTAMP. `DATEDIFF(field, start, finish)` (also `TIMESTAMPDIFF`) counts crossed unit boundaries and returns BIGINT; it does not measure a fractional duration. Field names are static identifiers or strings, while counts and values can be parameters. ISO weeks start Monday; the initial WEEK calendar starts Sunday. Locale-specific calendars and time-zone fields remain pending.
 
+`DATE_TRUNC(field, value)` discards smaller calendar/time fields without rounding; `DATE_TRUNC(month, DATE '2024-02-29')` returns `2024-02-01`. `LAST_DAY(value)` returns the month's final DATE, including leap years. `EXTRACT` also supports ISO week/year fields, signed-year periods and EPOCH, which returns `BigDecimal` seconds with nanosecond fractions. For unzoned timestamps, EPOCH uses calendar days and wall-clock time relative to `1970-01-01` without an offset adjustment. These functions work with parameters, CTAS and saved dynamic defaults; their type, scale and reference-specific behavior are detailed in [MIGRATION.md](MIGRATION.md).
+
 ## Persistent SQL databases
 
 Create a new database and reopen it in a later connection or process:

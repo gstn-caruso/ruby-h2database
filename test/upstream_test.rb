@@ -87,6 +87,18 @@ class UpstreamTest < DatabaseTest
     [*(0..37), *(46..59)].each { check_case(script.cases.fetch(it)) }
   end
 
+  def test_original_date_trunc_statements_except_zones_directives_and_modes
+    script = UpstreamScript.new(File.join(ROOT, "functions/timeanddate/date_trunc.sql"))
+    ranges = [1..13, 26..45, 58..77, 90..107, 114..126, 133..146, 153..161, 165..174,
+      181..195, 202..209, 216..224, 231..241, 248..256, 263..267, 271..290]
+    ranges.each { |range| range.each { check_case(script.cases.fetch(it)) } }
+  end
+
+  def test_original_extract_statements_except_types_zones_intervals_and_modes
+    script = UpstreamScript.new(File.join(ROOT, "functions/timeanddate/extract.sql"))
+    [*(2..12), 16, 30, 31, 60, 61, *(65..82)].each { check_case(script.cases.fetch(it)) }
+  end
+
   private
 
   def check_case(scenario)
@@ -109,12 +121,12 @@ class UpstreamTest < DatabaseTest
       assert_equal expected.first.delete_prefix("update count: ").to_i, result.update_count, location
     elsif scenario.scalar
       assert_equal 1, result.rows.length, location
-      assert_equal [expected.first], result.rows.first.map { text(it) }, location
+      assert_equal [expected.first], result.rows.first.each_with_index.map { |value, index| text(value, result.types[index]) }, location
     else
       spans = expected.fetch(1).enum_for(:scan, /-+/).map { Regexp.last_match.begin(0)...Regexp.last_match.end(0) }
       assert_equal spans.map { expected.first[it].strip }, result.columns.map { text(it) }, location
       expected_rows = expected[2...-1].map { |line| spans.map { line[it].to_s.strip } }
-      actual_rows = result.rows.map { |row| row.map { text(it) } }
+      actual_rows = result.rows.map { |row| row.each_with_index.map { |value, index| text(value, result.types[index]) } }
       if expected.last.start_with?("rows (ordered):")
         assert_equal expected_rows, actual_rows, location
       else
@@ -124,12 +136,12 @@ class UpstreamTest < DatabaseTest
     end
   end
 
-  def text(value)
+  def text(value, type = nil)
     case value
     when nil then "null"
     when true then "TRUE"
     when false then "FALSE"
-    when BigDecimal then value.to_s("F")
+    when BigDecimal then type&.scale == 0 && value.frac.zero? ? value.to_i.to_s : value.to_s("F")
     when String then H2::BinaryString.binary?(value) ? "X'#{value.unpack1('H*')}'" : value.gsub("\r\n", "\n").tr("\n", " ").gsub(/ +/, " ")
     else value.to_s
     end

@@ -57,6 +57,13 @@ class CLITest < Minitest::Test
     assert_includes error, "[42104]"
   end
 
+  def test_calendar_values_and_epoch_keep_their_numeric_scale
+    output = StringIO.new
+    sql = "SELECT DATE_TRUNC(month,DATE '2000-02-29') AS d,LAST_DAY(DATE '2000-02-01') AS last_day,EXTRACT(epoch FROM TIME '00:00:00') AS e,EXTRACT(epoch FROM TIME '00:00:00.000000001') AS n;"
+    assert_equal 0, H2::CLI.new.run(["--execute", sql], output: output)
+    assert_equal "D\tLAST_DAY\tE\tN\n2000-02-01\t2000-02-29\t0\t0.000000001\n(1 row)\n", output.string
+  end
+
   def test_escapes_control_characters_and_backslashes
     output = StringIO.new
     sql = "SELECT 'a\\b\tc\nd\r' AS value_text;"

@@ -273,7 +273,7 @@ module H2
         when Function
           if node.name == "EXTRACT"
             "EXTRACT(#{node.arguments.first.value} FROM #{expression(node.arguments.last, inside: true)})"
-          elsif DateTimeFunctions::NAMES.include?(node.name)
+          elsif DateTimeFunctions::NAMES.include?(node.name) || node.name == "DATE_TRUNC"
             "#{node.name}(#{node.arguments.first.value}, #{node.arguments.drop(1).map { expression(it, inside: true) }.join(', ')})"
           else
             "#{node.name}(#{node.distinct ? 'DISTINCT ' : ''}#{node.arguments.map { expression(it, inside: true) }.join(', ')})"
@@ -285,6 +285,9 @@ module H2
           name = type.name == "VARBINARY" ? "BINARY VARYING" : type.name
           name += "(#{type.precision})" if %w[BINARY VARBINARY].include?(type.name) && type.precision
           name += "(#{type.scale})" if %w[TIME TIMESTAMP].include?(type.name) && type.scale != (type.name == "TIME" ? 0 : 6)
+          if type.name == "NUMERIC" && type.precision && [type.precision, type.scale] != [100_000, 0]
+            name += "(#{type.precision}#{type.scale.to_i.zero? ? '' : ", #{type.scale}"})"
+          end
           "CAST(#{expression(node.expression, inside: true)} AS #{name})"
         when RowConstructor then "ROW (#{node.expressions.map { expression(it, inside: true) }.join(', ')})"
         when Subquery then "(#{query(node.query)})"

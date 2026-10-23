@@ -107,7 +107,10 @@ schema = [
   "INSERT INTO calendar VALUES(DATE '2000-01-31',TIME '23:59:59.999999999',TIMESTAMP '2000-01-31 23:59:59.999999999')",
   "CREATE TABLE calendar_default(d DATE DEFAULT TIMESTAMPADD(month,1,(SELECT MAX(d) FROM calendar)),n BIGINT DEFAULT TIMESTAMPDIFF(day,DATE '2000-01-01',(SELECT MAX(d) FROM calendar)))",
   "INSERT INTO calendar_default DEFAULT VALUES",
-  "CREATE TABLE calendar_shift AS SELECT DATEADD(ns,1,ts) AS ts,DATEDIFF(month,DATE '1999-12-31',d) AS n FROM calendar"
+  "CREATE TABLE calendar_shift AS SELECT DATEADD(ns,1,ts) AS ts,DATEDIFF(month,DATE '1999-12-31',d) AS n FROM calendar",
+  "CREATE TABLE periods(lo DATE DEFAULT DATE_TRUNC(month,(SELECT MAX(d) FROM calendar)),hi DATE DEFAULT LAST_DAY((SELECT MAX(d) FROM calendar)),iso INT DEFAULT EXTRACT(iso_week FROM (SELECT MAX(d) FROM calendar)),epoch NUMERIC(28,9) DEFAULT EXTRACT(epoch FROM (SELECT MAX(d) FROM calendar)))",
+  "INSERT INTO periods DEFAULT VALUES",
+  "CREATE TABLE trunc_copy AS SELECT DATE_TRUNC(month,d) AS d,DATE_TRUNC(mcs,t) AS t,DATE_TRUNC(iso_week_year,ts) AS ts,EXTRACT(epoch FROM ts) AS epoch,LAST_DAY(d) AS last_day FROM calendar"
 ]
 queries = ["TABLE people ORDER BY id", "TABLE pairs ORDER BY a,b", "TABLE bag ORDER BY a NULLS LAST,b NULLS LAST",
   "TABLE typed", "TABLE target", "TABLE rows_table", 'TABLE "odd""table"', "SELECT id FROM people WHERE name='Ada 😀'",
@@ -119,7 +122,9 @@ queries = ["TABLE people ORDER BY id", "TABLE pairs ORDER BY a,b", "TABLE bag OR
   "TABLE temporal ORDER BY d", "TABLE temporal_defaults ORDER BY y", "TABLE temporal_rows",
   "SELECT d FROM temporal WHERE t=TIME '12:34:56.123456789'",
   "TABLE calendar ORDER BY d", "TABLE calendar_default ORDER BY d", "TABLE calendar_shift",
-  "SELECT DATEADD(month,1,d) AS d,DATEADD(ns,1,t) AS t,DATEDIFF(second,ts,DATEADD(month,1,ts)) AS n FROM calendar ORDER BY d"]
+  "SELECT DATEADD(month,1,d) AS d,DATEADD(ns,1,t) AS t,DATEDIFF(second,ts,DATEADD(month,1,ts)) AS n FROM calendar ORDER BY d",
+  "TABLE periods ORDER BY lo", "TABLE trunc_copy ORDER BY d",
+  "SELECT EXTRACT(iso_week_year FROM d) AS y,EXTRACT(iso_week FROM d) AS w,DATE_TRUNC(week_year,ts) AS ts FROM calendar ORDER BY d"]
 changes = ["UPDATE people SET amount=amount+1 WHERE id=-7", "INSERT INTO people(id,name) VALUES(20,'new')",
   "DELETE FROM bag WHERE a IS NULL", "UPDATE bag SET b='updated' WHERE a=1", "INSERT INTO bag VALUES(2,'later')",
   "UPDATE source SET v=20", "INSERT INTO target DEFAULT VALUES", "INSERT INTO pairs VALUES('b',3,'z')",
@@ -139,7 +144,9 @@ changes = ["UPDATE people SET amount=amount+1 WHERE id=-7", "INSERT INTO people(
   "INSERT INTO temporal_defaults DEFAULT VALUES",
   "UPDATE calendar SET d=DATEADD(month,1,d),t=DATEADD(ns,1,t),ts=DATEADD(ns,1,ts)",
   "INSERT INTO calendar_default DEFAULT VALUES",
-  "INSERT INTO calendar_shift SELECT DATEADD(month,1,ts),DATEDIFF(day,DATE '2000-01-01',d) FROM calendar"]
+  "INSERT INTO calendar_shift SELECT DATEADD(month,1,ts),DATEDIFF(day,DATE '2000-01-01',d) FROM calendar",
+  "INSERT INTO periods DEFAULT VALUES",
+  "INSERT INTO trunc_copy SELECT DATE_TRUNC(month,d),DATE_TRUNC(mcs,t),DATE_TRUNC(iso_week_year,ts),EXTRACT(epoch FROM ts),LAST_DAY(d) FROM calendar"]
 
 Dir.mktmpdir("sql-persistence-reference-") do |directory|
   [:none, :fast, :high].each do |compression|
