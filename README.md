@@ -185,6 +185,19 @@ Character conversions use H2's numeric syntax: integer/decimal text accepts BMP 
 
 Native floating-point text follows the modern Java reference. Java 17 prints some values with extra digits; [MIGRATION.md](MIGRATION.md) records separately checked formatting differences and exact-bit comparisons. Compatibility modes, other aliases/conversions and complete metadata remain pending.
 
+## Binary floating-point arithmetic
+
+REAL arithmetic rounds each result to 32 bits; DOUBLE uses 64 bits. Chained operations, overflow to infinity and underflow to zero retain H2's behavior. Zero divisors raise 22012, including NaN/infinite dividends. `MOD` and `%` retain the dividend's sign, calculate in the common numeric type, then convert to the divisor's numeric type.
+
+```ruby
+H2.connect do |connection|
+  result = connection.execute("SELECT CAST(CAST(? AS REAL)+CAST(? AS REAL) AS DOUBLE)", "0.1", "0.2")
+  p result.rows # => [[0.30000001192092896]]
+end
+```
+
+NaN equals itself and sorts after positive infinity. Zero signs normalize to positive zero; NaN values remain consistent in keys, grouping, DISTINCT and set operations. SUM and AVG of REAL produce DOUBLE, with sequential addition and H2's sorted order for DISTINCT inputs. Arithmetic defaults, CTAS and NaN keys reopen through native storage and JDBC. Other numeric functions and complete parameter inference, composite metadata and optimizer behavior remain migration work.
+
 ## Rounding numbers and truncating dates
 
 `ROUND(value[, scale])` rounds decimal ties away from zero. `TRUNC` / `TRUNCATE` discard the fractional part toward zero; `FLOOR` rounds down and `CEIL` / `CEILING` round up. A negative scale selects digits before the decimal point. Scales range from -100,000 to 100,000; invalid scales raise 90008, and integer overflow raises 22003.

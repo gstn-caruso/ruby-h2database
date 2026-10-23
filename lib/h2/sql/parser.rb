@@ -797,6 +797,8 @@ module H2
             operator = take.value
             left = if %w[= <> != < > <= >=].include?(operator)
               comparison(left, operator)
+            elsif operator == "%"
+              Function.new("MOD", [left, expression(precedence + 1)], false)
             else
               Binary.new(operator, left, expression(precedence + 1))
             end

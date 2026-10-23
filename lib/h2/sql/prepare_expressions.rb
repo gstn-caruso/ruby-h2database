@@ -21,6 +21,7 @@ module H2
         end
         return prepare_case(node) if node.is_a?(CaseExpression)
         node = node.with(**node.to_h.transform_values { prepare(it) })
+        @evaluator.validate(node) if node.is_a?(Function) && node.name == "MOD" && statically_typed?(node)
         if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name) && statically_typed?(node)
           @evaluator.validate(node)
           expression = @evaluator.prepared_math(node).first
@@ -185,6 +186,7 @@ module H2
       def relevant?(node)
         return true if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name)
         return true if node.is_a?(Function) && node.name == "SIGN"
+        return true if node.is_a?(Function) && node.name == "MOD"
         return true if node.is_a?(Literal) && (node.value.is_a?(JsonValue) || node.value.is_a?(DecfloatValue))
         return true if [JsonFormat, JsonPredicate, TypePredicate, JsonConstructor].any? { node.is_a?(it) }
         return true if node.is_a?(Cast) && node.type.name == "JSON"

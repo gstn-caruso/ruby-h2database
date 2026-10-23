@@ -40,9 +40,20 @@ module H2
         BigDecimal(integer.to_s) * BigDecimal("1E-#{scale}")
       end
 
+      def modulus_type(types)
+        common = Type.common(types)
+        return Type.new("BIGINT", nil, 0) if common.name == "NULL"
+        raise Error.new(50004, "MOD argument types are unknown") if common.name == "UNKNOWN"
+        raise Error.new(90008, "MOD requires numeric arguments") unless (Type::INTEGER_LIMITS.keys + %w[NUMERIC REAL DOUBLE DECFLOAT]).include?(common.name)
+
+        divisor = types.last
+        (Type::INTEGER_LIMITS.keys + %w[NUMERIC REAL DOUBLE DECFLOAT]).include?(divisor.name) ? divisor : common
+      end
+
       def literal(value, type)
         return TypedLiteral.new(nil, type, true) if value.nil?
         return Literal.new(value) if value.is_a?(DecfloatValue)
+        type = FloatingOperations.type(type) if value.is_a?(Float) && FloatingOperations::NAMES.include?(type.name)
         return TypedLiteral.new(value, type, false) unless type.name == "NUMERIC"
 
         digits = ArrayType.decimal_text(value, type.scale).delete('-.').sub(/\A0+/, '')
