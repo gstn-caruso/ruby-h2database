@@ -15,6 +15,12 @@ module H2
           MVStore::Decimal.new((value * (10**scale)).to_i, scale)
         elsif type.name == "UUID"
           value.bytes
+        elsif type.name == "DATE"
+          value.packed
+        elsif type.name == "TIME"
+          value.nanos
+        elsif type.name == "TIMESTAMP"
+          [value.date.packed, value.time.nanos]
         else
           value
         end
@@ -29,7 +35,13 @@ module H2
           end
           return RowValue.new(type.fields.each_with_index.map { |field, index| decode(value.data[index], field) })
         end
-        type.convert(value.to_ruby)
+        data = case value.type
+        when :date then DateValue.from_packed(value.data)
+        when :time then TimeValue.new(value.data)
+        when :timestamp then TimestampValue.new(DateValue.from_packed(value.data[0]), TimeValue.new(value.data[1]))
+        else value.to_ruby
+        end
+        type.convert(data)
       end
     end
   end

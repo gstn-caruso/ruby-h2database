@@ -264,12 +264,18 @@ module H2
           when false then "FALSE"
           when String then BinaryString.binary?(node.value) ? "X'#{node.value.unpack1('H*')}'" : "'#{node.value.gsub("'", "''")}'"
           when UUIDValue then "UUID '#{node.value}'"
+          when DateValue, TimeValue, TimestampValue then "#{Temporal.name(node.value)} '#{node.value}'"
           when BigDecimal then node.value.to_s("F")
           else node.value.to_s
           end
         when Parameter then "?#{node.index + 1}"
         when Star then "*"
-        when Function then "#{node.name}(#{node.distinct ? 'DISTINCT ' : ''}#{node.arguments.map { expression(it, inside: true) }.join(', ')})"
+        when Function
+          if node.name == "EXTRACT"
+            "EXTRACT(#{node.arguments.first.value} FROM #{expression(node.arguments.last, inside: true)})"
+          else
+            "#{node.name}(#{node.distinct ? 'DISTINCT ' : ''}#{node.arguments.map { expression(it, inside: true) }.join(', ')})"
+          end
         when Binary then "#{expression(node.left, inside: true)} #{node.operator} #{expression(node.right, inside: true)}"
         when Unary then "#{node.operator} #{expression(node.operand, inside: true)}"
         when Cast

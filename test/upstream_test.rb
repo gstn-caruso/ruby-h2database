@@ -62,6 +62,21 @@ class UpstreamTest < DatabaseTest
     [*(0..3), *(6..10), *(12..15), *(18..28), *(39..45), *(49..51)].each { check_case(script.cases.fetch(it)) }
   end
 
+  def test_original_date_statements_except_information_schema
+    script = UpstreamScript.new(File.join(ROOT, "datatypes/date.sql"))
+    [0, *(2..16)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_time_statements_except_metadata_and_alter_table
+    script = UpstreamScript.new(File.join(ROOT, "datatypes/time.sql"))
+    [*(0..2), *(7..33)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_timestamp_statements_except_metadata_and_alter_table
+    script = UpstreamScript.new(File.join(ROOT, "datatypes/timestamp.sql"))
+    [*(0..2), *(6..39)].each { check_case(script.cases.fetch(it)) }
+  end
+
   private
 
   def check_case(scenario)
