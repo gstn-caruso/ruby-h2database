@@ -76,6 +76,8 @@ module H2
         @owner.read(@transaction, raw_map, key)
       end
 
+      def key?(key) = !self[key].nil?
+
       def []=(key, value)
         put(key, value)
         value

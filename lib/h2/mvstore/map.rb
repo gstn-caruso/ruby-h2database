@@ -22,6 +22,14 @@ module H2
         end
       end
 
+      def key?(key)
+        @store.synchronize do
+          check_open
+          key = key_type.copy(key)
+          key_found?(key_position(key),key)
+        end
+      end
+
       def []=(key, value)
         key, value = key_type.copy(key), value_type.copy(value)
         @store.synchronize do

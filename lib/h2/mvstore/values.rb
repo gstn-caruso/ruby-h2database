@@ -4,6 +4,26 @@ require "bigdecimal"
 
 module H2
   module MVStore
+    BlobMetadata = Data.define(:stream_id, :table_id, :byte_count, :content_hash) do
+      def initialize(stream_id:, table_id:, byte_count:, content_hash:)
+        raise ArgumentError, "Expected stream identifier bytes" unless stream_id.is_a?(String)
+        unless table_id.is_a?(Integer) && (-(1 << 31)...(1 << 31)).cover?(table_id)
+          raise ArgumentError, "Invalid LOB table id"
+        end
+        Codecs::LONG.copy(byte_count)
+        Codecs::LONG.copy(content_hash)
+        super(stream_id: stream_id.b.freeze, table_id: table_id, byte_count: byte_count, content_hash: content_hash)
+      end
+    end
+
+    BlobReference = Data.define(:stream_id, :lob_id) do
+      def initialize(stream_id:, lob_id:)
+        raise ArgumentError, "Expected stream identifier bytes" unless stream_id.is_a?(String)
+        Codecs::LONG.copy(lob_id)
+        super(stream_id: stream_id.b.freeze, lob_id: lob_id)
+      end
+    end
+
     Decimal = Data.define(:unscaled, :scale) do
       def initialize(unscaled:, scale:)
         raise ArgumentError, "Expected decimal integer and signed 32-bit scale" unless unscaled.is_a?(Integer) && scale.is_a?(Integer) && (-(1 << 31)...(1 << 31)).cover?(scale)

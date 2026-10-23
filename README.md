@@ -373,7 +373,7 @@ H2::MVStore::Store.open("counters.mv", read_only: true) do |store|
 end
 ```
 
-Maps support `[]`, `[]=`, `delete`, `size` and sorted enumeration. Raw map keys and values default to `:string`; use `:long` for signed 64-bit integers, `:bytes` for binary strings, and `:value` for typed SQL storage values. Specify the same codecs when reopening a raw map: its catalog does not store these builder choices. Maps in H2's transaction store can resolve their codecs from the file's type registry automatically. String keys follow Java's UTF-16 ordering, and typed keys use their storage comparator, including decimal keys with equivalent values but different scales. Inputs are copied and returned strings are frozen.
+Maps support `[]`, `[]=`, `key?`, `delete`, `size` and sorted enumeration. Raw map keys and values default to `:string`; use `:long` for signed 64-bit integers, `:bytes` for binary strings, and `:value` for typed SQL storage values. Specify the same codecs when reopening a raw map: its catalog does not store these builder choices. `open_registered_map(name, key_type:, value_type:)` saves codec references in H2's registry so `open_map(name)` can infer them on reopen; transaction maps also use this registry. String keys follow Java's UTF-16 ordering, and typed keys use their storage comparator, including decimal keys with equivalent values but different scales. Inputs are copied and returned strings are frozen.
 
 ```ruby
 H2::MVStore::Store.open("values.mv") do |store|
@@ -382,13 +382,41 @@ H2::MVStore::Store.open("values.mv") do |store|
 end
 ```
 
-`Value#type` preserves SQL type identity, `#data` exposes its immutable storage representation, and `#to_ruby` converts initial scalars and nested collections. `Decimal` retains both the unscaled integer and scale. The low-level temporal storage values expose H2's packed date/nanosecond/offset fields; the SQL API converts supported DATE/TIME/TIMESTAMP fields into the native objects described above. LOB references retain identifiers and lengths without fetching external content. Storage codecs cover more types than the SQL parser and expression evaluator currently support.
+`Value#type` preserves SQL type identity, `#data` exposes its immutable storage representation, and `#to_ruby` converts initial scalars and nested collections. `Decimal` retains both the unscaled integer and scale. The low-level temporal storage values expose H2's packed date/nanosecond/offset fields; the SQL API converts supported DATE/TIME/TIMESTAMP fields into the native objects described above. LOB values retain their database identifiers and lengths; the stream API below can resolve external content explicitly through the corresponding LOB metadata. Storage codecs cover more types than the SQL parser and expression evaluator currently support.
 
 Existing `table.<object_id>` and `index.<object_id>` maps can be opened with inferred registered codecs. Table entries contain `VersionedValue` objects with `current`, `committed`, `operation_id` and `entry_id`; current row fields are in `SearchRow#values`. This is low-level access: callers editing these maps must maintain table/index consistency. The SQL API maintains the supported table/index/catalog relationships itself.
 
 `commit` appends a chunk and synchronizes it before publishing the duplicated file headers. `rollback` restores the last commit; handles for maps created after that commit become invalid. Closing a writable store commits pending changes, including the block form. Compression options are `:none`, `:fast` (LZF) and `:high` (DEFLATE). Read-only opens share a lock; a writable open excludes other readers and writers, including Java processes. File locking currently requires 64-bit Linux on x86_64 or aarch64; local and CI verification use x86_64.
 
-`H2::MVStore::Error#code` exposes MVStore error numbers, separately from SQL errors: 2 for write failures/read-only mutation, 4 for closed handles, 5 for unsupported formats or codecs, 6 for corruption, and 7 for conflicting locks. Remaining SQL lifecycle/transaction behavior, collations, encryption, external LOB content and compaction remain pending. Zoned temporal keys compare by instant. Some other typed-key comparisons, including non-ASCII case-insensitive strings, explicitly fail as unsupported. Opened maps currently materialize sorted entries and use binary search; each changed map is rewritten on commit.
+`H2::MVStore::Error#code` exposes MVStore error numbers, separately from SQL errors: 2 for write failures/read-only mutation, 4 for closed handles, 5 for unsupported formats or codecs, 6 for corruption, and 7 for conflicting locks. Remaining SQL lifecycle/transaction behavior, collations, encryption, complete SQL LOB integration and compaction remain pending. Zoned temporal keys compare by instant. Some other typed-key comparisons, including non-ASCII case-insensitive strings, explicitly fail as unsupported. Opened maps currently materialize sorted entries and use binary search; each changed map is rewritten on commit.
+
+## Stream storage for external LOB data
+
+`H2::MVStore::StreamStore` implements H2's stream identifiers and block layout. Small payloads fit inside the identifier; larger ones use data blocks and indirect identifiers. `put(input)` reads an IO-like object without closing it and returns frozen binary identifier bytes. Keep the identifier alongside your other metadata.
+
+```ruby
+require "h2/mvstore"
+require "stringio"
+
+H2::MVStore::Store.open("streams.mv") do |store|
+  blocks = store.open_registered_map("blocks", key_type: :long, value_type: :bytes)
+  ids = store.open_registered_map("ids", key_type: :long, value_type: :bytes)
+  streams = H2::MVStore::StreamStore.new(blocks)
+  ids[1] = streams.put(StringIO.new("payload".b * 1000))
+end
+
+H2::MVStore::Store.open("streams.mv", read_only: true) do |store|
+  streams = H2::MVStore::StreamStore.new(store.open_map("blocks"))
+  reader = streams.get(store.open_map("ids")[1])
+  p reader.read(7) # => "payload"
+end
+```
+
+Readers fetch blocks as needed and support `read`, `readpartial`, `getbyte`, `skip`, `pos`/`tell`, `size`, `eof?` and `close`. `read(n)` fills across blocks and returns nil at EOF; `readpartial(n)` stops at a block boundary and raises EOFError at EOF. `skip(n)` returns the actual bytes skipped and can stop at the current buffer boundary. Closing a reader moves it to EOF. Block sizes default to 256 bytes for inline data and 256 KiB for stored blocks; set `min_block_size:` / `max_block_size:` to change them. Optional `on_store:` receives each stored block's byte count.
+
+`length(id)` and `in_place?(id)` inspect the identifier without reading map blocks. `max_block_key(id)` follows indirect identifiers; `remove(id)` deletes all its stored blocks. The caller manages sharing and references before removing a stream. `next_key` is adjustable, and allocation searches around existing keys; an exhausted upper key range raises RangeError without overwriting an existing block. Writes through a single StreamStore are serialized, and input failures reclaim blocks allocated by that write. Missing reader blocks raise IOError with an MVStore error 50 as the cause; malformed identifiers and cycles raise MVStore error 6.
+
+The `:blob_meta`, `:blob_reference` and `:null` codecs resolve H2's LOB maps. Immutable `BlobMetadata` exposes `stream_id`, `table_id`, `byte_count` and `content_hash`; the raw count follows the reference metadata and can represent CLOB characters. `BlobReference` exposes `stream_id` and `lob_id`. These differ from `LobReference`, which is the pointer stored in a SQL row. Native stream reads can recover external BLOB/CLOB payloads from JDBC-created files. SQL BLOB/CLOB declarations, conversions, JDBC-style LOB objects and the complete temporary/shared-reference lifecycle remain pending. Five verified Java StreamStore defects and their native handling are recorded in [MIGRATION.md](MIGRATION.md).
 
 ## MVStore transactions
 
