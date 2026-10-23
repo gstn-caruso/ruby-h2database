@@ -20,7 +20,7 @@ module H2
     Predicate = Data.define(:operator, :arguments)
     Function = Data.define(:name, :arguments, :distinct)
     class Aggregate < Data.define(:name, :arguments, :distinct, :order, :filter)
-      NAMES = %w[COUNT SUM AVG MIN MAX ARRAY_AGG].freeze
+      NAMES = %w[COUNT SUM AVG MIN MAX ARRAY_AGG BIT_AND_AGG BIT_OR_AGG BIT_XOR_AGG BIT_NAND_AGG BIT_NOR_AGG BIT_XNOR_AGG].freeze
     end
     Cast = Data.define(:expression, :type)
     RowConstructor = Data.define(:expressions)

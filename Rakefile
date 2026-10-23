@@ -27,6 +27,7 @@ namespace :test do
     ruby "test/reference/numeric_rounding.rb"
     ruby "test/reference/numeric_conversions.rb"
     ruby "test/reference/floating_arithmetic.rb"
+    ruby "test/reference/bit_functions.rb"
     ruby "test/reference/mvstore.rb"
     ruby "test/reference/sql_storage.rb"
     ruby "test/reference/transactions.rb"

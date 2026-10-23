@@ -252,6 +252,22 @@ changes.concat(['UPDATE floating_source SET a=0.3,b=0.4','INSERT INTO floating_s
   "INSERT INTO floating_keys VALUES(CAST('NaN' AS REAL)*CAST(2 AS REAL))",'INSERT INTO floating_keys VALUES(2)',
   'INSERT INTO floating_ctas SELECT a+b,a*b,AVG(a) FROM floating_source GROUP BY a,b'])
 
+schema.concat([
+  'CREATE TABLE bit_source(i TINYINT,j SMALLINT,s BIGINT,b VARBINARY(4))',
+  "INSERT INTO bit_source VALUES(3,6,1,X'c501'),(1,7,-1,X'63')",
+  "CREATE TABLE bit_saved(v TINYINT DEFAULT (SELECT LSHIFT(i,s) FROM bit_source WHERE j=6),a TINYINT DEFAULT (SELECT BITNOT(BIT_XOR_AGG(DISTINCT i) FILTER(WHERE j>0)) FROM bit_source),b BINARY(2) DEFAULT (SELECT ROTATELEFT(b,s) FROM bit_source WHERE j=6),p BINARY(1) DEFAULT BITAND(BITNOT(CAST(X'00' AS BINARY)),(SELECT b FROM bit_source WHERE j=6)))",
+  'INSERT INTO bit_saved DEFAULT VALUES',
+  'CREATE TABLE bit_copy AS SELECT BITAND(i,j) AS v,BITNOT(b) AS b,BITCOUNT(b) AS c FROM bit_source',
+  'CREATE TABLE bit_empty AS SELECT BIT_XOR_AGG(b) AS v FROM bit_source WHERE FALSE',
+  'CREATE TABLE bit_keys(v VARBINARY(4) PRIMARY KEY)',
+  "INSERT INTO bit_keys SELECT BITXOR(b,X'ff') FROM bit_source"
+])
+queries.concat(['TABLE bit_saved ORDER BY v','TABLE bit_copy ORDER BY v','TABLE bit_empty','TABLE bit_keys ORDER BY v',
+  "SELECT BIT_AND_AGG(i) AS a,BIT_OR_AGG(j) AS o,BIT_XOR_AGG(b) AS x FROM bit_source"])
+changes.concat(['UPDATE bit_source SET s=7,i=1 WHERE j=6','INSERT INTO bit_saved DEFAULT VALUES',
+  "INSERT INTO bit_keys SELECT BITXOR(b,X'ff') FROM bit_source WHERE j=6",'INSERT INTO bit_copy SELECT BITAND(i,j),BITNOT(b),BITCOUNT(b) FROM bit_source',
+  "UPDATE bit_source SET b=X'0102' WHERE j=6",'INSERT INTO bit_saved DEFAULT VALUES'])
+
 intervals = [
   ["YEAR", "1"], ["MONTH", "2"], ["DAY", "3"], ["HOUR", "4"], ["MINUTE", "5"], ["SECOND", "6.123456789"],
   ["YEAR TO MONTH", "1-2"], ["DAY TO HOUR", "1 2"], ["DAY TO MINUTE", "1 2:3"], ["DAY TO SECOND", "1 2:3:4.123456789"],
