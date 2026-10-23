@@ -8,8 +8,12 @@ module H2
     def run(arguments, input: $stdin, output: $stdout, error: $stderr)
       options = {}
       parser = OptionParser.new do |command|
-        command.banner = "Usage: h2 [--execute SQL | FILE.sql]\nExecute a SQL script in a new in-memory Ruby H2 database."
+        command.banner = "Usage: h2 [--database PATH] [--execute SQL | FILE.sql]\nExecute SQL in memory or in a native H2 MVStore file."
         command.on("-e", "--execute SQL", "Execute SQL") { options[:sql] = it }
+        command.on("-d", "--database PATH", "Open a persistent SQL database") { options[:path] = it }
+        command.on("--read-only", "Open the database read-only") { options[:read_only] = true }
+        command.on("--user NAME", "Database user (default: sa)") { options[:user] = it }
+        command.on("--password PASSWORD", "Database password") { options[:password] = it }
         command.on("-v", "--version", "Print version") { options[:version] = true }
         command.on("-h", "--help", "Print help") { options[:help] = true }
       end
@@ -22,7 +26,8 @@ module H2
         raise OptionParser::InvalidArgument, "provide either --execute or one SQL file"
       end
       sql = options[:sql] || (remaining.empty? ? input.read : File.read(remaining.first))
-      H2.connect do |connection|
+      database_options = options.select { |key, _value| [:path, :read_only, :user, :password].include?(key) }
+      H2.connect(**database_options) do |connection|
         connection.execute_script(sql).each { render(it, output) }
       end
       0

@@ -18,12 +18,14 @@ module H2
         when CreateTable then create(statement)
         when DropTable
           statement.names.each { table(it) } unless statement.if_exists
+          validate_drop_dependencies(statement.names)
           statement.names.each { @changes[it] = nil }
           Result.new(update_count: 0)
         when Truncate
           target = table(statement.name).copy
-          target.rows.clear
-          change(target, 0)
+          count = target.rows.length
+          target.truncate
+          change(target, count)
         when Insert then insert(statement)
         when Update then update(statement)
         when Delete then delete(statement)
@@ -35,6 +37,24 @@ module H2
 
       def table(name)
         @catalog.fetch(name) { raise Error.new(42102, "Table #{name} not found") }
+      end
+
+      def validate_drop_dependencies(names)
+        remaining = @catalog.reject { |name, _table| names.include?(name) }
+        remaining.each_value do |table|
+          table.columns.each do |column|
+            default = column.default
+            next unless default
+
+            expression, parameters = default.is_a?(CapturedExpression) ? [default.expression, default.parameters] : [default, []]
+            evaluator = Evaluator.new(parameters, queries: Queries.new(remaining, parameters))
+            evaluator.validate(expression)
+          rescue Error => error
+            raise unless error.code == 42102
+
+            raise Error.new(90107, "Cannot drop table because #{table.name} depends on it")
+          end
+        end
       end
 
       def change(target, count)
@@ -126,7 +146,7 @@ module H2
 
           values = assignments.to_h { |name, expression, value_evaluator| [name, value_evaluator.evaluate(expression, row)] }
           count += 1
-          target.convert_row(row.merge(values))
+          target.convert_row(row.merge(values), existing_row: row)
         end
         change(target, count)
       end

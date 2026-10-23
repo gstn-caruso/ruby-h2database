@@ -24,7 +24,7 @@ module H2
         raise
       end
 
-      def initialize(store, timeout_ms: 0, max_transactions: 255, owns_store: false)
+      def initialize(store, timeout_ms: 0, max_transactions: 255, owns_store: false, recover: true)
         raise ArgumentError, "Invalid transaction timeout" unless timeout_ms.is_a?(Integer) && timeout_ms >= 0
         raise ArgumentError, "Invalid transaction limit" unless max_transactions.is_a?(Integer) && (1..255).cover?(max_transactions)
 
@@ -39,7 +39,7 @@ module H2
         @registry = store.open_map("_", key_type: :string, value_type: :meta)
         @prepared = store.open_map("openTransactions", key_type: :object, value_type: :object)
         load_transactions
-        recover! unless store.read_only?
+        recover! if recover && !store.read_only?
       rescue Exception
         if @store && @undo_type
           @closed = true

@@ -49,7 +49,12 @@ module H2
       end
 
       def scan_token
-        if @scanner.peek(1) == "'"
+        if @scanner.scan(/[uU]&(?=['"])/)
+          delimiter = @scanner.peek(1)
+          raw = quoted(delimiter)
+          escape = unicode_escape_character
+          [delimiter == "'" ? :literal : :identifier, decode_unicode(raw, escape).freeze]
+        elsif @scanner.peek(1) == "'"
           [:literal, quoted("'").freeze]
         elsif @scanner.peek(1) == '"'
           [:identifier, quoted('"').freeze]
@@ -63,6 +68,65 @@ module H2
         else
           raise Error.new(42000, "Unexpected character at byte #{@scanner.pos}: #{@scanner.getch.inspect}")
         end
+      end
+
+      def unicode_escape_character
+        position = @scanner.pos
+        skip_trivia
+        unless @scanner.scan(/UESCAPE(?![\p{L}\p{N}_$])/i)
+          @scanner.pos = position
+          return "\\"
+        end
+        skip_trivia
+        raise Error.new(42000, "Expected UESCAPE character") unless @scanner.peek(1) == "'"
+
+        escape = quoted("'")
+        unless escape.codepoints.length == 1 && !escape.match?(/[\s0-9A-Fa-f'"+]/)
+          raise Error.new(42000, "Invalid UESCAPE character")
+        end
+        escape
+      end
+
+      def skip_trivia
+        loop do
+          if @scanner.skip(/\s+|--[^\n]*/)
+            next
+          elsif @scanner.scan(%r{/\*})
+            comment
+          else
+            break
+          end
+        end
+      end
+
+      def decode_unicode(raw, escape)
+        characters = raw.each_char.to_a
+        units = []
+        index = 0
+        while index < characters.length
+          char = characters[index]
+          index += 1
+          if char == escape
+            char = characters[index]
+            index += 1
+            unless char == escape
+              width = char == "+" ? 6 : 4
+              digits = char == "+" ? characters[index, width]&.join : ([char] + characters[index, width - 1].to_a).join
+              unless digits && digits.length == width && digits.match?(/\A[0-9a-fA-F]+\z/)
+                raise Error.new(90095, "Invalid Unicode string escape")
+              end
+              index += char == "+" ? width : width - 1
+              point = digits.to_i(16)
+              raise Error.new(50000, "Invalid Unicode code point") if point > 0x10ffff
+
+              units.concat(point > 0xffff ? [0xd800 + ((point - 0x10000) >> 10), 0xdc00 + ((point - 0x10000) & 1023)] : [point])
+              next
+            end
+          end
+          units.concat(char.encode(Encoding::UTF_16BE).unpack("n*"))
+        end
+        text = units.pack("n*").force_encoding(Encoding::UTF_16BE)
+        text.valid_encoding? ? text.encode(Encoding::UTF_8) : text
       end
 
       def number

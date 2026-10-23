@@ -4,8 +4,9 @@ module H2
   class Connection
     DDL = [SQL::CreateTable, SQL::DropTable, SQL::Truncate].freeze
 
-    def initialize(database)
+    def initialize(database, owns_database: false)
       @database = database
+      @owns_database = owns_database
       @changes = {}
       @originals = {}
       @savepoints = {}
@@ -47,6 +48,7 @@ module H2
       else
         ddl = DDL.any? { statement.is_a?(it) }
         commit(ddl: true) if ddl
+        @database.check_write if ddl || [SQL::Insert, SQL::Update, SQL::Delete].any? { statement.is_a?(it) }
         snapshot = @database.snapshot
         catalog = snapshot.merge(@changes).reject { |_name, value| value.nil? }
         executor = SQL::Executor.new(catalog, parameters)
@@ -111,15 +113,16 @@ module H2
     end
 
     def close
-      return if closed?
+      return if @closed
 
-      rollback
+      clear_transaction
       @closed = true
+      @database.close if @owns_database
       nil
     end
 
     def closed?
-      @closed
+      @closed || @database.closed?
     end
 
     private
