@@ -95,6 +95,26 @@ end
 
 `UUID '...'` supplies a typed literal. UUID casts accept H2's textual UUID form or exactly 16 binary bytes. `H2::UUIDValue` is immutable, exposes `.bytes`, and formats canonical lowercase text with `.to_s`. Both types work in defaults, key constraints, comparisons, ordering, initial ROW values and persisted tables/indexes. Integer/binary casts retain signed big-endian widths. `LENGTH` / `CHAR_LENGTH`, `OCTET_LENGTH` and `BIT_LENGTH` distinguish character, binary, integer and UUID representations. Full type metadata, UUID generation functions and remaining binary functions still need migration. Empty binary columns inferred by native CTAS use precision 1 so their saved declarations can reopen; the Java snapshot's zero-precision metadata limitation is recorded in [MIGRATION.md](MIGRATION.md).
 
+## Dates and times
+
+`DATE`, `TIME[(0..9)]` and `TIMESTAMP[(0..9)]` store calendar and wall-clock values without a time zone. Results use immutable `H2::DateValue`, `H2::TimeValue` and `H2::TimestampValue` objects, with canonical text from `.to_s`. Dates cover H2's Gregorian year range from -1,000,000,000 through 1,000,000,000. Times retain nanoseconds; column assignment and casts round to their declared scale, which defaults to 0 for TIME and 6 for TIMESTAMP.
+
+```ruby
+require "date"
+
+H2.connect do |connection|
+  connection.execute("CREATE TABLE events(d DATE, starts_at TIME(9))")
+  connection.execute("INSERT INTO events VALUES(?, ?)",
+    Date.new(2024, 2, 29), H2::TimeValue.parse("12:34:56.123456789"))
+  p connection.execute("SELECT d + 1, EXTRACT(HOUR FROM starts_at) FROM events").rows.map { |row| row.map(&:to_s) }
+  # => [["2024-03-01", "12"]]
+end
+```
+
+Ruby `Date` parameters become DATE; `Time` and `DateTime` parameters become TIMESTAMP by copying their displayed calendar/time components and nanoseconds. Their UTC offsets are not applied. Load Ruby's `date` library yourself when using Date/DateTime; the engine does not require it. Native temporal objects also work as parameters.
+
+The initial subset includes typed literals, component casts, comparisons, ordering, keys, set queries, persisted defaults/rows/indexes, integer-day and fractional-day arithmetic, DATE + TIME, TIME scaling, and calendar/time field extraction. `WITHOUT TIME ZONE` is accepted. Zoned types and text, TIME-to-TIMESTAMP conversion requiring the session date, intervals, remaining date/time functions and full temporal coercion remain pending and fail where unsupported. See [MIGRATION.md](MIGRATION.md) for the precise scope and reference evidence.
+
 ## Persistent SQL databases
 
 Create a new database and reopen it in a later connection or process:
@@ -157,7 +177,7 @@ H2::MVStore::Store.open("values.mv") do |store|
 end
 ```
 
-`Value#type` preserves SQL type identity, `#data` exposes its immutable storage representation, and `#to_ruby` converts initial scalars and nested collections. `Decimal` retains both the unscaled integer and scale. Temporal values currently expose H2's packed date/nanosecond/offset fields; LOB references retain identifiers and lengths without fetching external content. Storage codecs cover more types than the SQL parser and expression evaluator currently support.
+`Value#type` preserves SQL type identity, `#data` exposes its immutable storage representation, and `#to_ruby` converts initial scalars and nested collections. `Decimal` retains both the unscaled integer and scale. The low-level temporal storage values expose H2's packed date/nanosecond/offset fields; the SQL API converts supported DATE/TIME/TIMESTAMP fields into the native objects described above. LOB references retain identifiers and lengths without fetching external content. Storage codecs cover more types than the SQL parser and expression evaluator currently support.
 
 Existing `table.<object_id>` and `index.<object_id>` maps can be opened with inferred registered codecs. Table entries contain `VersionedValue` objects with `current`, `committed`, `operation_id` and `entry_id`; current row fields are in `SearchRow#values`. This is low-level access: callers editing these maps must maintain table/index consistency. The SQL API maintains the supported table/index/catalog relationships itself.
 
@@ -211,7 +231,7 @@ mvn -q -f h2/pom.xml -DskipTests package
 bundle exec rake test:reference
 ```
 
-This checks the relational, subquery, binary/UUID, set-query and CTE SQL fixtures against both engines, including result labels, type names, rows, update counts, errors and SQL states. Generated set/CTE cases additionally check type families, duplicate/null semantics, precedence, recursive batches and JDBC prepared parameters. Top-level binary result columns are compared byte-for-byte through JDBC `getBytes`, and a generated UTF-8 comparison covers every byte pair plus multibyte boundaries. It also cross-reads and cross-writes MVStore files with all three compression modes, checks B-tree lookups, preserves unopened maps, verifies file locks in both directions, and recovers commits after process death. Storage tests exercise real SQL rows/indexes and prepared transactions. The persistent SQL suite creates databases with each engine, exchanges SQL changes, reopens through both engines, verifies defaults/keys/row ids/credentials/DDL, and kills writers before commit, after commit and after the durable decision. The reference task reports the Java commit-marker recovery and zero-precision metadata limitations explicitly. Java is used only by this optional reference check; the Ruby runtime and native test suite do not require it. CI runs the reference comparison separately on Ruby 3.4 and 4.0.
+This checks the relational, subquery, binary/UUID, set-query, CTE and temporal SQL fixtures against both engines, including result labels, type names, rows, update counts, errors and SQL states. Generated set/CTE/temporal cases additionally check type families, duplicate/null semantics, precedence, recursive batches, Gregorian boundaries, nanosecond rounding and JDBC prepared parameters. Top-level binary result columns are compared byte-for-byte through JDBC `getBytes`, and a generated UTF-8 comparison covers every byte pair plus multibyte boundaries. It also cross-reads and cross-writes MVStore files with all three compression modes, checks B-tree lookups, preserves unopened maps, verifies file locks in both directions, and recovers commits after process death. Storage tests exercise real SQL rows/indexes and prepared transactions. The persistent SQL suite creates databases with each engine, exchanges SQL changes, reopens through both engines, verifies defaults/keys/row ids/credentials/DDL, and kills writers before commit, after commit and after the durable decision. The reference task reports the Java commit-marker recovery and zero-precision metadata limitations explicitly. Java is used only by this optional reference check; the Ruby runtime and native test suite do not require it. CI runs the reference comparison separately on Ruby 3.4 and 4.0.
 
 ## Upstream and license
 

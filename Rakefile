@@ -13,6 +13,7 @@ namespace :test do
     ruby "test/reference/binary_values.rb"
     ruby "test/reference/set_queries.rb"
     ruby "test/reference/common_tables.rb"
+    ruby "test/reference/temporal.rb"
     ruby "test/reference/mvstore.rb"
     ruby "test/reference/sql_storage.rb"
     ruby "test/reference/transactions.rb"

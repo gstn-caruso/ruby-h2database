@@ -2,7 +2,7 @@
 
 module H2
   class Type < Data.define(:name, :precision, :scale)
-    ORDER = %w[NULL CHAR VARCHAR BINARY VARBINARY BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE UUID].freeze
+    ORDER = %w[NULL CHAR VARCHAR BINARY VARBINARY BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE DATE TIME TIMESTAMP UUID].freeze
     INTEGER_LIMITS = {"TINYINT" => (-128..127), "SMALLINT" => (-32_768..32_767),
       "INTEGER" => (-2_147_483_648..2_147_483_647),
       "BIGINT" => (-9_223_372_036_854_775_808..9_223_372_036_854_775_807)}.freeze
@@ -14,6 +14,10 @@ module H2
         names = [left.name, right.name]
         binary = (names & %w[BINARY VARBINARY]).any?
         uuid = names.include?("UUID")
+        temporal = (names & Temporal::NAMES).any?
+        if temporal && ((names - %w[NULL UNKNOWN CHAR VARCHAR DATE TIME TIMESTAMP]).any? || names.sort == %w[DATE TIME])
+          raise Error.new(90110, "SQL temporal types are not comparable")
+        end
         if (binary && (names - %w[NULL UNKNOWN BINARY VARBINARY UUID]).any?) ||
             (uuid && (names - %w[NULL UNKNOWN CHAR VARCHAR BINARY VARBINARY UUID]).any?)
           raise Error.new(90110, "SQL types #{names.join(', ')} are not comparable")
@@ -41,6 +45,12 @@ module H2
 
       name = types.max_by { ORDER.index(it.name) || -1 }.name
       names = types.map(&:name)
+      if (names & Temporal::NAMES).any?
+        if (names - %w[CHAR VARCHAR DATE TIME TIMESTAMP]).any?
+          raise Error.new(22018, "Incompatible temporal SQL types")
+        end
+        name = "TIMESTAMP" if names.include?("DATE") && names.include?("TIME")
+      end
       if (names.include?("UUID") && (names - %w[UUID CHAR VARCHAR BINARY VARBINARY]).any?) ||
           ((names & %w[BINARY VARBINARY]).any? && (names & %w[BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE]).any?)
         raise Error.new(22018, "Incompatible SQL types #{names.join(', ')}")
@@ -51,6 +61,8 @@ module H2
         precision = 100_000
         scale ||= 0
       end
+      return Temporal.type(name, scale) if Temporal::NAMES.include?(name)
+
       new(name, precision, scale)
     end
 
@@ -90,6 +102,9 @@ module H2
         return value if value.is_a?(UUIDValue)
 
         BinaryString.binary?(value) ? UUIDValue.new(value) : UUIDValue.parse(value)
+      when *Temporal::NAMES
+        value = Temporal.convert(value, name)
+        name == "DATE" ? value : value.round(scale || (name == "TIME" ? 0 : 6))
       when "NUMERIC"
         decimal = BigDecimal(numeric_input(value).to_s)
         raise Error.new(22018, "Non-finite NUMERIC value") unless decimal.finite?
@@ -120,6 +135,8 @@ module H2
         CharacterString.trim_spaces(with(precision: nil).convert(value, source_type: source_type))
       when "VARCHAR", "BINARY", "VARBINARY"
         with(precision: nil).convert(value, source_type: source_type)
+      when *Temporal::NAMES
+        Temporal.convert(value, name)
       when "NUMERIC"
         number = BigDecimal(numeric_input(value).to_s)
         raise Error.new(22018, "Non-finite NUMERIC value") unless number.finite?

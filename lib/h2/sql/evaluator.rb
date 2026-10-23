@@ -7,7 +7,8 @@ module H2
       FUNCTIONS = {"COUNT" => 1..1, "SUM" => 1..1, "AVG" => 1..1, "MIN" => 1..1, "MAX" => 1..1,
         "UPPER" => 1..1, "UCASE" => 1..1, "LOWER" => 1..1, "LCASE" => 1..1, "LENGTH" => 1..1, "CHAR_LENGTH" => 1..1,
         "OCTET_LENGTH" => 1..1, "BIT_LENGTH" => 1..1,
-        "ABS" => 1..1, "COALESCE" => 1..Float::INFINITY, "IFNULL" => 2..2, "NULLIF" => 2..2, "MOD" => 2..2}.freeze
+        "ABS" => 1..1, "COALESCE" => 1..Float::INFINITY, "IFNULL" => 2..2, "NULLIF" => 2..2, "MOD" => 2..2,
+        "EXTRACT" => 2..2}.merge(TemporalOperations::FIELDS.to_h { [it, 1..1] }).freeze
 
       attr_reader :scope, :outer_bindings
 
@@ -60,7 +61,7 @@ module H2
             end
             validate(argument, aggregates: aggregates, inside_aggregate: inside_aggregate || aggregate)
           end
-          if %w[SUM AVG].include?(node.name) && %w[BINARY VARBINARY UUID].include?(type_of(node.arguments.first)&.name)
+          if %w[SUM AVG].include?(node.name) && %w[BINARY VARBINARY UUID DATE TIME TIMESTAMP].include?(type_of(node.arguments.first)&.name)
             raise Error.new(90015, "Invalid type for #{node.name}")
           end
         when Default, Star
@@ -70,7 +71,7 @@ module H2
           if node.is_a?(Binary) && %w[= <> != < > <= >=].include?(node.operator)
             Type.check_comparable(type_of(node.left), type_of(node.right))
           elsif node.is_a?(Binary) && %w[+ - * / %].include?(node.operator)
-            type = Type.common([type_of(node.left), type_of(node.right)])
+            type = type_of(node)
             if %w[BINARY VARBINARY UUID].include?(type.name)
               raise Error.new(50100, "Arithmetic on #{type.name}")
             end
@@ -200,7 +201,10 @@ module H2
           end
           return 0
         end
-        if left.is_a?(UUIDValue) || right.is_a?(UUIDValue)
+        if Temporal.value?(left) || Temporal.value?(right)
+          Type.check_comparable(type_of(Literal.new(left)), type_of(Literal.new(right)))
+          return Temporal.compare(left, right)
+        elsif left.is_a?(UUIDValue) || right.is_a?(UUIDValue)
           Type.check_comparable(type_of(Literal.new(left)), type_of(Literal.new(right)))
           uuid = Type.new("UUID", nil, nil)
           return uuid.convert(left) <=> uuid.convert(right)
@@ -265,6 +269,9 @@ module H2
           when Float then Type.new("DOUBLE", nil, nil)
           when String then Type.new(BinaryString.binary?(node.value) ? "VARBINARY" : "VARCHAR", node.value.length, nil)
           when UUIDValue then Type.new("UUID", nil, nil)
+          when DateValue then Temporal.type("DATE")
+          when TimeValue then Temporal.type("TIME", 9)
+          when TimestampValue then Temporal.type("TIMESTAMP", 9)
           when true, false then Type.new("BOOLEAN", nil, nil)
           when nil then Type.new("NULL", nil, nil)
           when RowValue then RowType.new(node.value.values.map { type_of(Literal.new(it)) })
@@ -280,6 +287,8 @@ module H2
           end
 
           types = [type_of(node.left), type_of(node.right)]
+          return TemporalOperations.type(node.operator, *types) if types.any? { Temporal::NAMES.include?(it&.name) }
+
           type = Type.common(types)
           if node.operator == "*" && type.name == "NUMERIC"
             type = type.with(scale: types.compact.sum { it.scale || 0 })
@@ -443,6 +452,8 @@ module H2
       end
 
       def function_type(node)
+        return Type.new("INTEGER", nil, 0) if node.name == "EXTRACT" || TemporalOperations::FIELDS.include?(node.name)
+
         argument_type = type_of(node.arguments.first)
         case node.name
         when "COUNT", "LENGTH", "CHAR_LENGTH", "OCTET_LENGTH", "BIT_LENGTH" then Type.new("BIGINT", nil, 0)
@@ -467,7 +478,7 @@ module H2
       end
 
       def numeric(value)
-        if BinaryString.binary?(value) || value.is_a?(UUIDValue)
+        if BinaryString.binary?(value) || value.is_a?(UUIDValue) || Temporal.value?(value)
           raise Error.new(50100, "Numeric operation on binary or UUID values")
         end
         return value if value.is_a?(Numeric)
@@ -502,6 +513,12 @@ module H2
           return false
         end
         return nil if left.nil? || right.nil?
+        if %w[+ - * / %].include?(node.operator)
+          left_type, right_type = type_of(node.left), type_of(node.right)
+          if [left_type, right_type].any? { Temporal::NAMES.include?(it&.name) }
+            return TemporalOperations.evaluate(node.operator, left, right, left_type, right_type)
+          end
+        end
         if %w[= <> != < > <= >=].include?(node.operator) && (left.is_a?(RowValue) ^ right.is_a?(RowValue))
           raise Error.new(22018, "Cannot compare row and scalar values")
         end
@@ -618,6 +635,8 @@ module H2
           return first
         end
         return nil if values.any?(&:nil?)
+        return TemporalOperations.extract(first, second) if node.name == "EXTRACT"
+        return TemporalOperations.extract(node.name, first) if TemporalOperations::FIELDS.include?(node.name)
 
         case node.name
         when "UPPER", "UCASE" then BinaryString.text(first).upcase.freeze

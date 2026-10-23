@@ -97,7 +97,12 @@ schema = [
   "INSERT INTO set_default DEFAULT VALUES",
   "CREATE TABLE cte_rows AS WITH RECURSIVE r(n) AS (VALUES 1 UNION ALL SELECT n+1 FROM r WHERE n<3) TABLE r",
   "CREATE TABLE cte_default(v INT DEFAULT (WITH RECURSIVE r(n) AS (VALUES 1 UNION ALL SELECT n+1 FROM r WHERE n<(SELECT MAX(v) FROM source)) SELECT MAX(n) FROM r))",
-  "INSERT INTO cte_default DEFAULT VALUES"
+  "INSERT INTO cte_default DEFAULT VALUES",
+  "CREATE TABLE temporal(d DATE PRIMARY KEY,t TIME(9) UNIQUE,ts TIMESTAMP(9))",
+  "INSERT INTO temporal VALUES(DATE '-1000000000-01-01',TIME '00:00:00.000000001',TIMESTAMP '-1000000000-01-01 12:34:56.123456789'),(DATE '0000-02-29',TIME '12:34:56.123456789',TIMESTAMP '0000-02-29 23:59:59.999999999'),(DATE '1000000000-12-31',TIME '23:59:59.999999999',TIMESTAMP '1000000000-12-31 23:59:59.999999999')",
+  "CREATE TABLE temporal_defaults(d DATE DEFAULT DATE '2000-02-29',t TIME(9) DEFAULT TIME '12:34:56.123456789',ts TIMESTAMP(9) DEFAULT TIMESTAMP '2000-02-29 12:34:56.123456789',y INT DEFAULT EXTRACT(YEAR FROM (SELECT MAX(d) FROM temporal)))",
+  "INSERT INTO temporal_defaults DEFAULT VALUES",
+  "CREATE TABLE temporal_rows AS SELECT ROW(DATE '2000-01-01',TIME '12:34:56.123456789',TIMESTAMP '2000-01-01 00:00:00.123456789') AS pair"
 ]
 queries = ["TABLE people ORDER BY id", "TABLE pairs ORDER BY a,b", "TABLE bag ORDER BY a NULLS LAST,b NULLS LAST",
   "TABLE typed", "TABLE target", "TABLE rows_table", 'TABLE "odd""table"', "SELECT id FROM people WHERE name='Ada 😀'",
@@ -105,7 +110,9 @@ queries = ["TABLE people ORDER BY id", "TABLE pairs ORDER BY a,b", "TABLE bag OR
   "TABLE empty_binary", "TABLE binary_rows", "TABLE set_rows ORDER BY id", "TABLE set_default ORDER BY v",
   "SELECT id FROM set_rows INTERSECT SELECT id FROM people ORDER BY id",
   "TABLE cte_rows ORDER BY n", "TABLE cte_default ORDER BY v",
-  "WITH q(n) AS (TABLE cte_rows) SELECT n FROM q WHERE n IN(WITH r(n) AS (VALUES 1,3) TABLE r) ORDER BY n"]
+  "WITH q(n) AS (TABLE cte_rows) SELECT n FROM q WHERE n IN(WITH r(n) AS (VALUES 1,3) TABLE r) ORDER BY n",
+  "TABLE temporal ORDER BY d", "TABLE temporal_defaults ORDER BY y", "TABLE temporal_rows",
+  "SELECT d FROM temporal WHERE t=TIME '12:34:56.123456789'"]
 changes = ["UPDATE people SET amount=amount+1 WHERE id=-7", "INSERT INTO people(id,name) VALUES(20,'new')",
   "DELETE FROM bag WHERE a IS NULL", "UPDATE bag SET b='updated' WHERE a=1", "INSERT INTO bag VALUES(2,'later')",
   "UPDATE source SET v=20", "INSERT INTO target DEFAULT VALUES", "INSERT INTO pairs VALUES('b',3,'z')",
@@ -116,7 +123,13 @@ changes = ["UPDATE people SET amount=amount+1 WHERE id=-7", "INSERT INTO people(
   "INSERT INTO bytes(u,v) VALUES('22222222-2222-2222-2222-222222222222',X'80ff00')",
   "INSERT INTO binary_defaults DEFAULT VALUES", "INSERT INTO set_default DEFAULT VALUES",
   "INSERT INTO set_rows SELECT id FROM people EXCEPT VALUES 0", "INSERT INTO cte_default DEFAULT VALUES",
-  "INSERT INTO cte_rows WITH q(n) AS (VALUES 4) TABLE q"]
+  "INSERT INTO cte_rows WITH q(n) AS (VALUES 4) TABLE q",
+  "UPDATE temporal SET d=d+1,ts=ts+1 WHERE d=DATE '0000-02-29'",
+  "DELETE FROM temporal WHERE d=DATE '1000000000-12-31'",
+  "INSERT INTO temporal VALUES(DATE '2000-02-29',TIME '10:00:00.000000002',TIMESTAMP '2000-02-29 00:00:00.000000002')",
+  "INSERT INTO temporal VALUES(DATE '2000-02-29',NULL,NULL)",
+  "INSERT INTO temporal VALUES(DATE '2000-03-01',TIME '10:00:00.000000002',NULL)",
+  "INSERT INTO temporal_defaults DEFAULT VALUES"]
 
 Dir.mktmpdir("sql-persistence-reference-") do |directory|
   [:none, :fast, :high].each do |compression|

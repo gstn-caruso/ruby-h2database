@@ -35,6 +35,7 @@ module H2
           return "ROW(#{value.fields.each_with_index.map { |field, index| "#{identifier("C#{index + 1}")} #{type(field)}" }.join(', ')})"
         end
         case value.name
+        when "TIME", "TIMESTAMP" then "#{value.name}(#{value.scale || (value.name == 'TIME' ? 0 : 6)})"
         when "NUMERIC" then "NUMERIC(#{value.precision || 100_000},#{value.scale || 0})"
         when "VARCHAR", "CHAR", "BINARY", "VARBINARY" then value.precision ? "#{value.name}(#{value.precision})" : value.name
         else value.name
@@ -53,6 +54,7 @@ module H2
             [Encoding::UTF_16BE, Encoding::UTF_16LE].include?(value.encoding) ? unicode_quote(value, "'") : "'#{value.gsub("'", "''")}'"
           end
         when UUIDValue then "UUID '#{value}'"
+        when DateValue, TimeValue, TimestampValue then "#{Temporal.name(value)} '#{value}'"
         when BigDecimal then value.to_s("F")
         when Integer then value.to_s
         when Float
@@ -75,7 +77,12 @@ module H2
         when SQL::Unary then "(#{node.operator} #{render.call(node.operand)})"
         when SQL::Binary then "(#{render.call(node.left)} #{node.operator} #{render.call(node.right)})"
         when SQL::Cast then "CAST(#{render.call(node.expression)} AS #{type(node.type)})"
-        when SQL::Function then "#{node.name}(#{node.distinct ? 'DISTINCT ' : ''}#{node.arguments.map { render.call(it) }.join(', ')})"
+        when SQL::Function
+          if node.name == "EXTRACT"
+            "EXTRACT(#{node.arguments.first.value} FROM #{render.call(node.arguments.last)})"
+          else
+            "#{node.name}(#{node.distinct ? 'DISTINCT ' : ''}#{node.arguments.map { render.call(it) }.join(', ')})"
+          end
         when SQL::RowConstructor then "ROW(#{node.expressions.map { render.call(it) }.join(', ')})"
         when SQL::Subquery then "(#{query(node.query, parameters: parameters, ctes: ctes)})"
         when SQL::Exists then "EXISTS(#{query(node.query, parameters: parameters, ctes: ctes)})"

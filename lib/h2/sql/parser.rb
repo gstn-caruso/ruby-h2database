@@ -109,6 +109,7 @@ module H2
         return query if query_start? || keyword?("(")
 
         case take.value
+        when "CALL" then Select.new([Projection.new(expression, nil)], nil, nil, [], nil, false, [], nil, nil)
         when "EXPLAIN" then Explain.new(parse_statement)
         when "CREATE" then create
         when "DROP"
@@ -219,6 +220,7 @@ module H2
       def parse_type
         name = take.value
         name = TYPE_NAMES.fetch(name, name)
+        return temporal_type(name) if Temporal::NAMES.include?(name)
         if name == "CHAR" && accept("VARYING")
           name = "VARCHAR"
         elsif name == "BINARY" && accept("VARYING")
@@ -252,6 +254,34 @@ module H2
           raise Error.new(90008, "Invalid precision or scale")
         end
         token.value
+      end
+
+      def temporal_type(name)
+        scale = name == "TIME" ? 0 : (name == "TIMESTAMP" ? 6 : nil)
+        if accept("(")
+          raise Error.new(42001, "DATE does not have fractional precision") if name == "DATE"
+
+          sign = accept("-") ? -1 : 1
+          token = take
+          syntax("fractional precision") unless token.kind == :literal && token.value.is_a?(Integer)
+          scale = sign * token.value
+          expect(")")
+          raise Error.new(90008, "Fractional seconds scale cannot be negative") if scale.negative?
+          raise Error.new(90151, "Fractional seconds scale must be 0 through 9") if scale > 9
+        end
+        temporal_zone_suffix if name != "DATE"
+        Temporal.type(name, scale)
+      end
+
+      def temporal_zone_suffix
+        if accept("WITHOUT")
+          expect("TIME")
+          expect("ZONE")
+        elsif accept("WITH")
+          expect("TIME")
+          expect("ZONE")
+          raise Error.new(50100, "Time-zone types have not yet been ported")
+        end
       end
 
       def insert
@@ -612,6 +642,23 @@ module H2
         when "NULL" then Literal.new(nil)
         when "TRUE" then Literal.new(true)
         when "FALSE" then Literal.new(false)
+        when "DATE", "TIME", "TIMESTAMP"
+          if current.kind == :literal || keyword?("WITH") || keyword?("WITHOUT")
+            temporal_zone_suffix unless token.value == "DATE"
+            text = take
+            syntax("datetime literal") unless text.kind == :literal && text.value.is_a?(String)
+            Literal.new(Temporal.parse(token.value, text.value))
+          else
+            column_or_function(token)
+          end
+        when "EXTRACT"
+          expect("(")
+          field = take.value
+          raise Error.new(90008, "Unknown datetime field #{field}") unless TemporalOperations::FIELDS.include?(field)
+          expect("FROM")
+          argument = expression
+          expect(")")
+          Function.new("EXTRACT", [Literal.new(field), argument], false)
         when "UUID"
           if current.kind == :literal && current.value.is_a?(String) && !BinaryString.binary?(current.value)
             Literal.new(UUIDValue.parse(take.value))

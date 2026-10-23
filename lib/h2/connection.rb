@@ -185,9 +185,10 @@ module H2
         raise Error.new(7001, "Expected #{parameter_count} parameters, got #{parameters.length}")
       end
       values = parameters.map do |value|
+        value = Temporal.from_ruby(value)
         case value
         when String then value.dup.freeze
-        when nil, true, false, Integer, BigDecimal, UUIDValue then value
+        when nil, true, false, Integer, BigDecimal, UUIDValue, DateValue, TimeValue, TimestampValue then value
         when Float
           raise Error.new(22018, "Non-finite parameter") unless value.finite?
 
