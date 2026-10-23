@@ -19,6 +19,9 @@ module H2
     IntervalDifference = Data.define(:left, :right, :type)
     Predicate = Data.define(:operator, :arguments)
     Function = Data.define(:name, :arguments, :distinct)
+    class Aggregate < Data.define(:name, :arguments, :distinct, :order, :filter)
+      NAMES = %w[COUNT SUM AVG MIN MAX ARRAY_AGG].freeze
+    end
     Cast = Data.define(:expression, :type)
     RowConstructor = Data.define(:expressions)
     ArrayConstructor = Data.define(:expressions)
@@ -32,10 +35,11 @@ module H2
     Ordering = Data.define(:expression, :descending, :nulls, :position)
     TableSource = Data.define(:name, :qualified)
     RangeSource = Data.define(:name, :arguments)
+    UnnestSource = Data.define(:arguments, :types, :ordinality)
     DerivedSource = Data.define(:query)
     AliasedSource = Data.define(:source, :name, :columns)
     JoinSource = Data.define(:left, :right, :kind, :condition, :using_columns, :natural)
-    Select = Data.define(:projections, :source, :where, :group, :having, :distinct, :order, :limit, :offset)
+    Select = Data.define(:projections, :source, :where, :group, :having, :distinct, :order, :limit, :offset, :aggregate_query)
     Values = Data.define(:rows, :order, :limit, :offset)
     SetQuery = Data.define(:left, :right, :operator, :order, :limit, :offset)
     CommonTableDefinition = Data.define(:name, :columns, :query)

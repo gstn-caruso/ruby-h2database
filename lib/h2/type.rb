@@ -6,6 +6,12 @@ module H2
     INTEGER_LIMITS = {"TINYINT" => (-128..127), "SMALLINT" => (-32_768..32_767),
       "INTEGER" => (-2_147_483_648..2_147_483_647),
       "BIGINT" => (-9_223_372_036_854_775_808..9_223_372_036_854_775_807)}.freeze
+    NUMERIC_WIDTHS = {"BOOLEAN" => [1, 0], "TINYINT" => [3, 0], "SMALLINT" => [5, 0], "INTEGER" => [10, 0],
+      "BIGINT" => [19, 0], "REAL" => [85, 46], "DOUBLE" => [634, 325]}.freeze
+
+    def self.numeric_info(type)
+      type.name == "NUMERIC" ? [type.precision || 100_000, type.scale || 0] : NUMERIC_WIDTHS.fetch(type.name, [100_000, 50_000])
+    end
 
     def self.check_comparable(left, right)
       a, b = left, right
@@ -80,8 +86,9 @@ module H2
       precision = types.any? { it.precision.nil? } ? nil : types.map(&:precision).max
       scale = types.filter_map(&:scale).max
       if name == "NUMERIC"
-        precision = 100_000
-        scale ||= 0
+        numeric = types.map { numeric_info(it) }
+        scale = numeric.map(&:last).max
+        precision = [numeric.map { |width, source_scale| width + scale - source_scale }.max, 100_000].min
       end
       return Temporal.type(name, scale) if Temporal::NAMES.include?(name)
 
@@ -93,7 +100,7 @@ module H2
 
       case name
       when "NULL"
-        raise Error.new(22018, "Cannot assign a non-NULL value to NULL type")
+        nil
       when *INTEGER_LIMITS.keys
         integer(value)
       when "VARCHAR", "CHAR"

@@ -136,6 +136,16 @@ class UpstreamTest < DatabaseTest
     [0, 1, 2, *(5..7), *(9..12)].each { check_case(script.cases.fetch(it)) }
   end
 
+  def test_original_array_aggregation_except_indexes_identity_windows_and_plans
+    script = UpstreamScript.new(File.join(ROOT, "functions/aggregate/array_agg.sql"))
+    [0, 1, 2, 4, 5, 6, *(13..16), 37, 61, 62, *(70..77)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_unnest_except_plans_and_json
+    script = UpstreamScript.new(File.join(ROOT, "functions/system/unnest.sql"))
+    [*(0..5), *(8..10)].each { check_case(script.cases.fetch(it)) }
+  end
+
   private
 
   def check_case(scenario)

@@ -38,17 +38,7 @@ module H2
     end
 
     def self.element_common(types)
-      result = Type.common(types)
-      return result unless result.name == "NUMERIC"
-
-      types = types.reject { %w[NULL UNKNOWN].include?(it.name) }
-      widths = {"BOOLEAN" => [1, 0], "TINYINT" => [3, 0], "SMALLINT" => [5, 0], "INTEGER" => [10, 0],
-        "BIGINT" => [19, 0], "REAL" => [85, 46], "DOUBLE" => [634, 325]}
-      numeric = types.map do |type|
-        type.name == "NUMERIC" ? [type.precision || 100_000, type.scale || 0] : widths.fetch(type.name, [100_000, 50_000])
-      end
-      scale = numeric.map(&:last).max
-      Type.new("NUMERIC", [numeric.map { |precision, source_scale| precision + scale - source_scale }.max, 100_000].min, scale)
+      Type.common(types)
     end
 
     def self.common(left, right)

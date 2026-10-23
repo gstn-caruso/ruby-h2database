@@ -58,6 +58,7 @@ module H2
           end
           Relation.new(bindings, bindings, [source.name], [], loader)
         when RangeSource then range(source, outer_scope)
+        when UnnestSource then unnest(source)
         when DerivedSource
           plan = @queries.prepare(source.query)
           bindings = plan.columns.each_with_index.map { |name, index| binding(name, nil, plan.types[index]) }
@@ -109,6 +110,27 @@ module H2
           RangeRows.new(first, last, step || 1, column.key)
         end
         Relation.new([column], [column], [source.name], evaluator.outer_bindings, loader)
+      end
+
+      def unnest(source)
+        raise Error.new(7001, "UNNEST requires at least one argument") if source.arguments.empty?
+
+        evaluator = Evaluator.new(@parameters, queries: @queries)
+        source.arguments.each { evaluator.validate(it) }
+        columns = source.types.each_with_index.map { |type, index| binding("C#{index + 1}", "UNNEST", type) }
+        columns << binding("NORD", "UNNEST", Type.new("INTEGER", nil, 0)) if source.ordinality
+        loader = lambda do |outer_row|
+          arrays = source.arguments.map do |argument|
+            value = evaluator.evaluate(argument, outer_row)
+            value.nil? ? [] : (value.is_a?(ArrayValue) || value.is_a?(RowValue) ? value.values : [value])
+          end
+          (0...arrays.map(&:length).max).lazy.map do |index|
+            values = arrays.map { it[index] }
+            values << index + 1 if source.ordinality
+            columns.each_with_index.to_h { |column, position| [column.key, values[position]] }
+          end
+        end
+        Relation.new(columns, columns, ["UNNEST"], evaluator.outer_bindings, loader)
       end
 
       def join(source, outer_scope)

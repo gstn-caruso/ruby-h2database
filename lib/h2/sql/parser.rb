@@ -112,7 +112,13 @@ module H2
         return query if query_start? || keyword?("(")
 
         case take.value
-        when "CALL" then Select.new([Projection.new(expression, nil)], nil, nil, [], nil, false, [], nil, nil)
+        when "CALL"
+          if keyword?("UNNEST") && @tokens[@position + 1]&.value == "("
+            Select.new([Projection.new(Star.new(nil), nil)], table_primary, nil, [], nil, false, [], nil, nil, false)
+          else
+            node = expression
+            Select.new([Projection.new(node, nil)], nil, nil, [], nil, false, [], nil, nil, aggregate_syntax?(node))
+          end
         when "EXPLAIN" then Explain.new(parse_statement)
         when "CREATE" then create
         when "DROP"
@@ -244,6 +250,7 @@ module H2
       def base_type
         name = take.value
         name = TYPE_NAMES.fetch(name, name)
+        return Type.new("NULL", nil, nil) if name == "NULL"
         raise Error.new(42001, "Expected array element type") if name == "ARRAY"
         return interval_type.first if name == "INTERVAL"
         return temporal_type(name) if Temporal::NAMES.include?(name)
@@ -449,6 +456,7 @@ module H2
         syntax("end of query") if statement.limit && (limit || offset)
         changes = {}
         changes[:order] = order unless order.empty?
+        changes[:aggregate_query] = true if statement.is_a?(Select) && aggregate_syntax?(order)
         changes[:limit] = limit if limit
         changes[:offset] = offset if offset
         changes.empty? ? statement : statement.with(**changes)
@@ -498,12 +506,12 @@ module H2
           []
         end
         having = expression if accept("HAVING")
-        Select.new(projections, source, where, group, having, distinct, [], nil, nil)
+        Select.new(projections, source, where, group, having, distinct, [], nil, nil, aggregate_syntax?([projections, having]))
       end
 
       def table_query
         source = source_name
-        Select.new([Projection.new(Star.new(nil), nil)], source, nil, [], nil, false, [], nil, nil)
+        Select.new([Projection.new(Star.new(nil), nil)], source, nil, [], nil, false, [], nil, nil, false)
       end
 
       def values
@@ -561,7 +569,14 @@ module H2
           if accept("(")
             arguments = keyword?(")") ? [] : list { expression }
             expect(")")
-            RangeSource.new(name, arguments)
+            if name == "UNNEST"
+              types = StaticTypes.new(@context, @parameter_count)
+              ordinality = accept("WITH")
+              expect("ORDINALITY") if ordinality
+              UnnestSource.new(arguments, arguments.map { types.unnest_type(it) }, !!ordinality)
+            else
+              RangeSource.new(name, arguments)
+            end
           else
             reference
           end
@@ -891,6 +906,8 @@ module H2
       def column_or_function(token)
         name = token.value
         if accept("(")
+          return aggregate(name) if Aggregate::NAMES.include?(name)
+
           name = "CARDINALITY" if name == "ARRAY_LENGTH"
           distinct = accept("DISTINCT")
           arguments = keyword?(")") ? [] : list { expression }
@@ -908,6 +925,50 @@ module H2
           accept("*") ? Star.new(name) : ColumnRef.new(identifier, name)
         else
           ColumnRef.new(name, nil)
+        end
+      end
+
+      def aggregate(name)
+        distinct = accept("DISTINCT")
+        accept("ALL") unless distinct
+        arguments = keyword?(")") ? [] : list { expression }
+        order = []
+        if name == "ARRAY_AGG" && accept("ORDER")
+          expect("BY")
+          order = list do
+            node = expression
+            descending = accept("DESC")
+            accept("ASC") unless descending
+            nulls = nil
+            if accept("NULLS")
+              nulls = accept("FIRST") ? :first : (expect("LAST"); :last)
+            end
+            Ordering.new(node, !!descending, nulls, false)
+          end
+        end
+        expect(")")
+        filter = nil
+        if keyword?("FILTER") && @tokens[@position + 1]&.value == "("
+          take
+          expect("(")
+          expect("WHERE")
+          filter = expression
+          expect(")")
+        end
+        raise Error.new(50100, "Window aggregates have not yet been ported") if keyword?("OVER")
+
+        Aggregate.new(name, arguments, !!distinct, order, filter)
+      end
+
+      def aggregate_syntax?(node)
+        case node
+        when Aggregate then true
+        when Subquery, ArrayQuery, Exists then false
+        when InQuery then aggregate_syntax?(node.expression)
+        when Array then node.any? { aggregate_syntax?(it) }
+        when Data
+          node.class.name.start_with?("H2::SQL::") && node.to_h.values.any? { aggregate_syntax?(it) }
+        else false
         end
       end
     end

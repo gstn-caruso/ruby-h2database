@@ -111,7 +111,20 @@ end
 
 Ruby arrays, including nested arrays, become copied immutable `H2::ArrayValue` parameters. Results expose `.values`, `.element_type` and canonical `.to_s` output. SQL array types expose their element type, maximum cardinality in `.precision` and a component-aware `.name`. Elements use a common SQL type; decimal arrays retain their component scale. Assignment rejects an oversized array; a cast converts every element before truncating to the requested cardinality. Use explicit parameter casts such as `ARRAY[CAST(? AS INT)]` when H2 cannot infer a component type.
 
-Indexes start at 1; invalid indexes raise 22034. `||`, `ARRAY_CAT` and `ARRAY_APPEND` concatenate arrays or append/prepend scalars. `CARDINALITY` / `ARRAY_LENGTH`, `ARRAY_MAX_CARDINALITY`, `TRIM_ARRAY`, `ARRAY_CONTAINS`, `ARRAY_SLICE` and `ARRAY_GET` are available. Array equality and ordering retain H2's null semantics; `ARRAY_CONTAINS` uses null-safe element equality. Arrays work in keys, grouping, distinct/set queries, correlated query constructors and persisted defaults/rows/indexes. Array aggregation, `UNNEST`, quantified comparisons, compatibility modes and complete component metadata remain pending; [MIGRATION.md](MIGRATION.md) records the verified scope.
+Indexes start at 1; invalid indexes raise 22034. `||`, `ARRAY_CAT` and `ARRAY_APPEND` concatenate arrays or append/prepend scalars. `CARDINALITY` / `ARRAY_LENGTH`, `ARRAY_MAX_CARDINALITY`, `TRIM_ARRAY`, `ARRAY_CONTAINS`, `ARRAY_SLICE` and `ARRAY_GET` are available. Array equality and ordering retain H2's null semantics; `ARRAY_CONTAINS` uses null-safe element equality. Arrays work in keys, grouping, distinct/set queries, correlated query constructors and persisted defaults/rows/indexes.
+
+`ARRAY_AGG` collects values, including nulls, with optional `DISTINCT`, internal `ORDER BY` and `FILTER(WHERE ...)`. Empty groups return SQL NULL. Filters also work with `COUNT`, `SUM`, `AVG`, `MIN` and `MAX`. `UNNEST` expands one or more arrays, padding shorter inputs with nulls; `WITH ORDINALITY` adds the one-based `NORD` column.
+
+```ruby
+H2.connect do |connection|
+  result = connection.execute("SELECT ARRAY_AGG(v ORDER BY v DESC) FILTER(WHERE v>1) AS a FROM UNNEST(CAST(? AS INT ARRAY)) t(v)", [1, nil, 3, 2])
+  p result.rows.first.first.values # => [3, 2]
+  p connection.execute("SELECT * FROM UNNEST(ARRAY[10,20],ARRAY['a']) WITH ORDINALITY").rows
+  # => [[10, "a", 1], [20, nil, 2]]
+end
+```
+
+Cast `UNNEST` parameters explicitly to establish their column types. H2 reports NULL metadata for untyped parameters and other expressions without a statically known array type, even when their runtime values are non-null; aggregation and CTAS retain that behavior. Window aggregates, other table functions, quantified comparisons, compatibility modes and complete component metadata remain pending; [MIGRATION.md](MIGRATION.md) records the verified scope.
 
 ## Dates and times
 
