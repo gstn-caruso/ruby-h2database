@@ -218,4 +218,9 @@ class SessionTemporalTest < DatabaseTest
       assert_equal [[H2::DateValue.parse("2000-02-29"), "new"]], rows("SELECT CURRENT_DATE,branch FROM deferred_clock")
     end
   end
+
+  def test_invalid_simple_case_types_are_checked_even_without_input
+    assert_sql_error 90110, "SELECT CASE DATE '2000-01-01' WHEN TIME '00:00:00' THEN 1 ELSE 2 END WHERE FALSE"
+    assert_equal [[nil]], rows("SELECT NULL IN(DATE '2000-01-01',TIME '00:00:00')")
+  end
 end
