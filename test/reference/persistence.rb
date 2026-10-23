@@ -194,6 +194,21 @@ schema.concat([
 queries.concat(["TABLE quantified_defaults ORDER BY q", "TABLE quantified_rows ORDER BY a"])
 changes.concat(["INSERT INTO quantified_defaults DEFAULT VALUES", "UPDATE quantified_rows SET different=a=ANY(ARRAY[ARRAY[2]])"])
 
+schema.concat([
+  "CREATE TABLE json_values(j JSON(100) PRIMARY KEY,a JSON ARRAY,d JSON DEFAULT JSON_OBJECT('n':(SELECT v FROM source),'duplicate':JSON '{\"a\":1,\"a\":2}'))",
+  "INSERT INTO json_values(j,a) VALUES(JSON 'null',ARRAY[JSON '1',JSON 'null',NULL]),(JSON '{\"a\":1,\"a\":2}',ARRAY[JSON '[]',JSON '{}']),(JSON '\"😀\"',NULL)",
+  "CREATE TABLE json_queries(j JSON DEFAULT JSON_ARRAY(SELECT v FROM source ORDER BY v DESC),p BOOLEAN DEFAULT (SELECT CAST(v AS JSON) FROM source) IS JSON SCALAR WITH UNIQUE KEYS,n JSON DEFAULT JSON_OBJECT('n':1e100,'source':(SELECT v FROM source)))",
+  "INSERT INTO json_queries DEFAULT VALUES",
+  "CREATE TABLE json_ctas AS SELECT JSON_OBJECT('a':a,'n':n) AS j FROM arrays"
+])
+queries.concat(["TABLE json_values ORDER BY j", "TABLE json_queries ORDER BY j", "TABLE json_ctas ORDER BY j"])
+changes.concat(["INSERT INTO json_values(j) VALUES(JSON '[1,2]')", "UPDATE json_values SET a=ARRAY[JSON 'true',JSON '{\"x\":[1,null]}'] WHERE j=JSON 'null'",
+  "INSERT INTO json_queries DEFAULT VALUES", "INSERT INTO json_ctas SELECT JSON_ARRAY(a) FROM arrays"])
+schema.concat(["CREATE TABLE json_decimals(v DECFLOAT(12) PRIMARY KEY)",
+  "INSERT INTO json_decimals VALUES(CAST('1e100' AS DECFLOAT)),(CAST('1.2300' AS DECFLOAT)),(CAST('NaN' AS DECFLOAT)),(CAST('Infinity' AS DECFLOAT)),(CAST('-Infinity' AS DECFLOAT))"])
+queries << "TABLE json_decimals ORDER BY v"
+changes << "INSERT INTO json_decimals VALUES(CAST('9.999' AS DECFLOAT(3)))"
+
 intervals = [
   ["YEAR", "1"], ["MONTH", "2"], ["DAY", "3"], ["HOUR", "4"], ["MINUTE", "5"], ["SECOND", "6.123456789"],
   ["YEAR TO MONTH", "1-2"], ["DAY TO HOUR", "1 2"], ["DAY TO MINUTE", "1 2:3"], ["DAY TO SECOND", "1 2:3:4.123456789"],

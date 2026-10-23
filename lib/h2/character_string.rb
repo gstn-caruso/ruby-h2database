@@ -20,5 +20,20 @@ module H2
         value.sub(/ +\z/, "").freeze
       end
     end
+
+    def fit(value, precision, pad:, cast:)
+      return value.dup.freeze unless precision
+
+      units = sort_key(value).unpack('n*')
+      if units.length > precision
+        unless cast || (pad && units.drop(precision).all? { it == 32 })
+          raise Error.new(22001, "Character value exceeds declared precision")
+        end
+        units = units.first(precision)
+      end
+      units.concat(Array.new(precision - units.length, 32)) if pad
+      text = units.pack('n*').force_encoding(Encoding::UTF_16BE)
+      (text.valid_encoding? ? text.encode(Encoding::UTF_8) : text).freeze
+    end
   end
 end

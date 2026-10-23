@@ -2,7 +2,7 @@
 
 module H2
   class Type < Data.define(:name, :precision, :scale)
-    ORDER = (%w[NULL CHAR VARCHAR BINARY VARBINARY BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE] + Temporal::NAMES + Intervals::NAMES + ["UUID"]).freeze
+    ORDER = (%w[NULL CHAR VARCHAR BINARY VARBINARY BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE DECFLOAT] + Temporal::NAMES + Intervals::NAMES + %w[JSON UUID]).freeze
     INTEGER_LIMITS = {"TINYINT" => (-128..127), "SMALLINT" => (-32_768..32_767),
       "INTEGER" => (-2_147_483_648..2_147_483_647),
       "BIGINT" => (-9_223_372_036_854_775_808..9_223_372_036_854_775_807)}.freeze
@@ -29,6 +29,9 @@ module H2
         left.fields.zip(right.fields).each { check_comparable(*it) }
       elsif left && right && !left.is_a?(RowType) && !right.is_a?(RowType)
         names = [left.name, right.name]
+        if names.include?("JSON") && (names - %w[NULL UNKNOWN CHAR VARCHAR BINARY VARBINARY JSON]).any?
+          raise Error.new(90110, "SQL JSON types are not comparable")
+        end
         interval_names = names.select { Intervals.name?(it) }
         if !interval_names.empty?
           allowed = Intervals::NAMES + %w[NULL UNKNOWN CHAR VARCHAR]
@@ -44,7 +47,7 @@ module H2
             (names.include?("DATE") && names.any? { Temporal.time_type?(it) }))
           raise Error.new(90110, "SQL temporal types are not comparable")
         end
-        if (binary && (names - %w[NULL UNKNOWN BINARY VARBINARY UUID]).any?) ||
+        if (binary && (names - %w[NULL UNKNOWN BINARY VARBINARY JSON UUID]).any?) ||
             (uuid && (names - %w[NULL UNKNOWN CHAR VARCHAR BINARY VARBINARY UUID]).any?)
           raise Error.new(90110, "SQL types #{names.join(', ')} are not comparable")
         end
@@ -89,6 +92,9 @@ module H2
         numeric = types.map { numeric_info(it) }
         scale = numeric.map(&:last).max
         precision = [numeric.map { |width, source_scale| width + scale - source_scale }.max, 100_000].min
+      elsif name == "DECFLOAT"
+        precision = types.map { it.precision || 100_000 }.max
+        scale = 0
       end
       return Temporal.type(name, scale) if Temporal::NAMES.include?(name)
 
@@ -97,10 +103,19 @@ module H2
 
     def convert(value, cast: false, source_type: nil, context: nil)
       return nil if value.nil?
+      if value.is_a?(JsonValue) && !%w[NULL CHAR VARCHAR BINARY VARBINARY JSON].include?(name)
+        raise Error.new(22018, "Cannot convert JSON to #{name}")
+      end
 
       case name
       when "NULL"
         nil
+      when "JSON"
+        json = JsonValue.convert(value, source_type: source_type)
+        raise Error.new(22001, "JSON exceeds declared precision") if precision && json.bytes.bytesize > precision
+
+        json
+      when "DECFLOAT" then DecfloatValue.convert(value, source_type: source_type).round(precision || 100_000)
       when *INTEGER_LIMITS.keys
         integer(value)
       when "VARCHAR", "CHAR"
@@ -110,14 +125,7 @@ module H2
         when BigDecimal then value.to_s("F")
         else BinaryString.text(value)
         end
-        if precision && text.length > precision
-          unless cast || (name == "CHAR" && text[precision..].match?(/\A *\z/))
-            raise Error.new(22001, "Value too long for #{name}(#{precision})")
-          end
-          text = text[0, precision]
-        end
-
-        (name == "CHAR" && precision ? text.ljust(precision) : text).dup.freeze
+        CharacterString.fit(text, precision, pad: name == "CHAR", cast: cast)
       when "BINARY", "VARBINARY"
         bytes = BinaryString.encode(value, source_type: source_type)
         if precision && bytes.bytesize > precision
@@ -162,6 +170,8 @@ module H2
       return nil if value.nil?
 
       case name
+      when "JSON" then JsonValue.convert(value, source_type: source_type)
+      when "DECFLOAT" then DecfloatValue.convert(value, source_type: source_type)
       when "CHAR"
         CharacterString.trim_spaces(with(precision: nil).convert(value, source_type: source_type, context: context))
       when "VARCHAR", "BINARY", "VARBINARY"
@@ -184,6 +194,7 @@ module H2
     private
 
     def numeric_input(value)
+      return value.to_d if value.is_a?(DecfloatValue)
       return value.to_d if value.is_a?(IntervalValue)
       if BinaryString.binary?(value) || value.is_a?(UUIDValue)
         raise Error.new(22018, "Cannot convert binary or UUID to #{name}")
@@ -195,6 +206,7 @@ module H2
     end
 
     def integer(value)
+      value = value.to_d if value.is_a?(DecfloatValue)
       if BinaryString.binary?(value)
         format = BinaryString::INTEGER_PACK.fetch(name)
         width = {"TINYINT" => 1, "SMALLINT" => 2, "INTEGER" => 4, "BIGINT" => 8}.fetch(name)
@@ -216,6 +228,7 @@ module H2
     end
 
     def boolean(value)
+      value = value.to_d if value.is_a?(DecfloatValue)
       raise Error.new(22018, "Cannot convert INTERVAL to BOOLEAN") if value.is_a?(IntervalValue)
       if BinaryString.binary?(value) || value.is_a?(UUIDValue)
         raise Error.new(22018, "Cannot convert binary or UUID to BOOLEAN")

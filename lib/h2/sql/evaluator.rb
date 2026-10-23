@@ -47,6 +47,9 @@ module H2
           end
         when WhenPredicate
           validate(node.predicate, aggregates: aggregates, inside_aggregate: inside_aggregate)
+        when JsonConstructor, JsonFormat, JsonPredicate, TypePredicate
+          children(node).each { validate(it, aggregates: aggregates, inside_aggregate: inside_aggregate) }
+          evaluate(node) if constant?(node)
         when Function, Aggregate
           arity = FUNCTIONS[node.name]
           raise Error.new(50100, "Function #{node.name} not yet ported") unless arity
@@ -73,7 +76,10 @@ module H2
             aggregate_order(node)
           end
           argument_type = type_of(node.arguments.first)
-          if %w[SUM AVG].include?(node.name) && (argument_type.is_a?(ArrayType) || (%w[BINARY VARBINARY UUID] + Temporal::NAMES).include?(argument_type&.name))
+          if %w[SUM AVG ABS MOD].include?(node.name) && node.arguments.any? { type_of(it)&.name == "DECFLOAT" }
+            raise Error.new(50100, "DECFLOAT numeric functions have not yet been ported")
+          end
+          if %w[SUM AVG].include?(node.name) && (argument_type.is_a?(ArrayType) || (%w[BINARY VARBINARY UUID JSON] + Temporal::NAMES).include?(argument_type&.name))
             raise Error.new(90015, "Invalid type for #{node.name}")
           end
           function_type(node) if datetime_function?(node)
@@ -88,10 +94,12 @@ module H2
             Type.check_comparable(type_of(node.left), type_of(node.right))
           elsif node.is_a?(Binary) && %w[+ - * / %].include?(node.operator)
             type = type_of(node)
-            if type.is_a?(ArrayType)
+            if type.name == "DECFLOAT"
+              raise Error.new(50100, "DECFLOAT arithmetic has not yet been ported")
+            elsif type.is_a?(ArrayType)
               code = children(node).all? { constant?(it) } ? 50100 : 50000
               raise Error.new(code, "Arithmetic on arrays is unavailable")
-            elsif %w[BINARY VARBINARY UUID].include?(type.name)
+            elsif %w[BINARY VARBINARY UUID JSON].include?(type.name)
               raise Error.new(50100, "Arithmetic on #{type.name}")
             end
           elsif node.is_a?(Predicate) && [:in, :between, :distinct, :not_distinct].include?(node.operator)
@@ -214,15 +222,31 @@ module H2
 
           case node.operator
           when "NOT" then !boolean(value)
-          when "+" then value.is_a?(IntervalValue) ? value : numeric(value)
-          when "-" then value.is_a?(IntervalValue) ? value.negate : check_integer(-numeric(value), node)
+          when "+" then value.is_a?(IntervalValue) || value.is_a?(DecfloatValue) ? value : numeric(value)
+          when "-" then value.is_a?(IntervalValue) || value.is_a?(DecfloatValue) ? value.negate : check_integer(-numeric(value), node)
           end
         when Binary then binary(node, row, group)
         when IntervalDifference
           left, right = [node.left, node.right].map { evaluate(it, row, group) }
           left.nil? || right.nil? ? nil : IntervalOperations.forced_difference(node.type, left, right, context: context)
         when Predicate then predicate(node, row, group)
-        when Cast then node.type.convert(evaluate(node.expression, row, group), cast: true, source_type: type_of(node.expression), context: context)
+        when Cast
+          value = evaluate(node.expression, row, group)
+          if node.type.name == "DECFLOAT" && value.is_a?(BigDecimal) && (text = json_number_text(node.expression))
+            value = DecfloatValue.parse(text)
+          end
+          value = json_value(node.expression, value) if node.type.name == "JSON" && !value.nil?
+          node.type.convert(value, cast: true, source_type: type_of(node.expression), context: context)
+        when JsonFormat
+          value = evaluate(node.expression, row, group)
+          if value.is_a?(String) || value.nil?
+            JsonFunctions.format(value, type_of(node.expression))
+          else
+            json_value(node.expression, value)
+          end
+        when JsonPredicate then JsonFunctions.predicate(node, evaluate(node.expression, row, group))
+        when TypePredicate then JsonFunctions.type_predicate(node, evaluate(node.expression, row, group), type_of(node.expression))
+        when JsonConstructor then json_constructor(node, row, group)
         when Aggregate then aggregate(node, group)
         when Function then function(node, row, group)
         when RowConstructor then RowValue.new(node.expressions.map { evaluate(it, row, group) })
@@ -233,6 +257,7 @@ module H2
           return nil if array.nil? || index.nil?
 
           index = Type.new("INTEGER", nil, nil).convert(index)
+          return array.element(index) if array.is_a?(JsonValue)
           raise Error.new(22034, "Array index #{index} is outside 1..#{array.values.length}") unless (1..array.values.length).cover?(index)
 
           array.values[index - 1]
@@ -273,6 +298,8 @@ module H2
         when Binary then evaluate(node.with(left: TypedLiteral.new(operand, type_of(node.left), false)), row, group)
         when Predicate
           evaluate(node.with(arguments: [TypedLiteral.new(operand, type_of(node.arguments.first), false), *node.arguments.drop(1)]), row, group)
+        when JsonPredicate, TypePredicate
+          evaluate(node.with(expression: TypedLiteral.new(operand, type_of(node.expression), false)), row, group)
         end
         result == true
       end
@@ -303,6 +330,10 @@ module H2
           left, right = [left, right].map { type.coerce(it, context: context) }
           return compare(left, right)
         end
+        if left.is_a?(JsonValue) || right.is_a?(JsonValue)
+          return JsonValue.convert(left).bytes <=> JsonValue.convert(right).bytes
+        end
+        return DecfloatValue.convert(left) <=> DecfloatValue.convert(right) if left.is_a?(DecfloatValue) || right.is_a?(DecfloatValue)
         if left.is_a?(IntervalValue) || right.is_a?(IntervalValue)
           type = Type.check_comparable(type_of(Literal.new(left)), type_of(Literal.new(right)))
           return Intervals.convert(left, Intervals.qualifier(type)).absolute <=> Intervals.convert(right, Intervals.qualifier(type)).absolute
@@ -388,6 +419,7 @@ module H2
           ArrayType.new(ArrayType.element_common(types), node.expressions.length)
         when ArrayElement
           type = type_of(node.array)
+          return Type.new("JSON", JsonValue::MAX_PRECISION, 0) if type.name == "JSON"
           return type if type.name == "NULL"
           raise Error.new(50004, "Array input type is unknown") if type.name == "UNKNOWN"
           raise Error.new(90008, "Array access requires an array") unless type.is_a?(ArrayType)
@@ -401,7 +433,10 @@ module H2
         when Subquery
           plan = subquery_plan(node)
           plan.constant? && constant_subquery(node, plan).nil? ? Type.new("NULL", nil, nil) : query_type(plan)
-        when Exists, InQuery, QuantifiedArray, WhenPredicate then Type.new("BOOLEAN", nil, nil)
+        when Exists, InQuery, QuantifiedArray, WhenPredicate, JsonPredicate, TypePredicate then Type.new("BOOLEAN", nil, nil)
+        when JsonFormat
+          constant?(node.expression) && evaluate(node.expression).nil? ? Type.new("NULL", nil, nil) : Type.new("JSON", JsonValue::MAX_PRECISION, 0)
+        when JsonConstructor then Type.new("JSON", JsonValue::MAX_PRECISION, 0)
         when CaseExpression then prepared_case(node).last
         when Parameter
           value = @parameters.fetch(node.index)
@@ -419,8 +454,12 @@ module H2
             Type.new(name, nil, 0)
           when BigDecimal then Type.new("NUMERIC", nil, [node.value.scale, 0].max)
           when Float then Type.new("DOUBLE", nil, nil)
-          when String then Type.new(BinaryString.binary?(node.value) ? "VARBINARY" : "VARCHAR", node.value.length, nil)
+          when String
+            binary = BinaryString.binary?(node.value)
+            Type.new(binary ? "VARBINARY" : "VARCHAR", binary ? node.value.bytesize : CharacterString.sort_key(node.value).bytesize / 2, nil)
           when UUIDValue then Type.new("UUID", nil, nil)
+          when JsonValue then Type.new("JSON", JsonValue::MAX_PRECISION, 0)
+          when DecfloatValue then Type.new("DECFLOAT", node.value.precision, 0)
           when DateValue then Temporal.type("DATE")
           when TimeValue then Temporal.type("TIME", 9)
           when TimestampValue then Temporal.type("TIMESTAMP", 9)
@@ -470,6 +509,8 @@ module H2
         when ArrayElement then [node.array, node.index]
         when QuantifiedArray then [node.expression, node.array]
         when WhenPredicate then [node.predicate]
+        when JsonFormat, JsonPredicate, TypePredicate then [node.expression]
+        when JsonConstructor then node.arguments
         when CaseExpression
           expression = prepared_case(node).first
           expression.is_a?(CaseExpression) ? case_children(expression) : [expression]
@@ -482,6 +523,10 @@ module H2
       end
 
       def optimized_expression(node)
+        if [JsonFormat, JsonPredicate, TypePredicate, JsonConstructor].any? { node.is_a?(it) } && constant?(node)
+          value = evaluate(node)
+          return TypedLiteral.new(value, type_of(node), value.nil? && !node.is_a?(JsonFormat))
+        end
         if node.is_a?(QuantifiedArray) && constant?(node)
           value = evaluate(node)
           return TypedLiteral.new(value, Type.new("BOOLEAN", nil, nil), value.nil?)
@@ -534,6 +579,58 @@ module H2
       end
 
       private
+
+      def json_value(expression, value)
+        JsonValue.convert(value, source_type: type_of(expression), number_text: json_number_text(expression))
+      end
+
+      def json_number_text(expression)
+        number = expression.is_a?(DecimalLiteral) ? expression.text : nil
+        if expression.is_a?(Unary) && expression.operand.is_a?(DecimalLiteral)
+          text = expression.operand.text
+          number = text && (expression.operator == "-" ? "-#{text}" : text)
+        end
+        number
+      end
+
+      def json_constructor(node, row, group)
+        arguments = node.arguments
+        single = arguments.first if node.kind == :array && arguments.length == 1
+        query = single.is_a?(JsonFormat) ? single.expression : single
+        if query.is_a?(Subquery)
+          plan = subquery_plan(query)
+          values = if plan.constant?
+            [constant_subquery(query, plan)]
+          else
+            plan.execute(row).rows.map { it.length == 1 ? it.first : RowValue.new(it) }
+          end
+          values = values.map { JsonFunctions.format(it, query_type(plan)) } if single.is_a?(JsonFormat)
+          type = single.is_a?(JsonFormat) ? Type.new("JSON", JsonValue::MAX_PRECISION, 0) : query_type(plan)
+          entries = values.map { JsonValue.convert(it, source_type: type) }
+        else
+          entries = []
+          if node.kind == :object
+            arguments.each_slice(2) do |key, argument|
+              name = evaluate(key, row, group)
+              raise Error.new(90008, "NULL JSON_OBJECT key") if name.nil?
+
+              key_type = type_of(key)
+              text = if name.is_a?(BigDecimal)
+                lexical = json_number_text(key)
+                lexical && lexical.match?(/[eE]/) ? DecfloatValue.parse(lexical).to_s : ArrayType.decimal_text(name, key_type.scale)
+              elsif name.is_a?(Float)
+                JsonValue.float_text(name, real: key_type.name == "REAL")
+              else
+                Type.new("VARCHAR", nil, nil).convert(name, source_type: key_type, context: context)
+              end
+              entries << text << json_value(argument, evaluate(argument, row, group))
+            end
+          else
+            entries = arguments.map { json_value(it, evaluate(it, row, group)) }
+          end
+        end
+        JsonFunctions.construct(node, entries)
+      end
 
       def quantified_array(node, row, group, value = evaluate(node.expression, row, group))
         array = evaluate(node.array, row, group)
@@ -689,7 +786,8 @@ module H2
         when Literal, TypedLiteral, DecimalLiteral then true
         when TimeZoneExpression then !node.zone.nil? && children(node).all? { constant?(it) }
         when Subquery then subquery_plan(node).constant?
-        when Unary, Binary, IntervalDifference, Predicate, Cast, RowConstructor, ArrayConstructor, ArrayElement, QuantifiedArray then children(node).all? { constant?(it) }
+        when Unary, Binary, IntervalDifference, Predicate, Cast, RowConstructor, ArrayConstructor, ArrayElement, QuantifiedArray,
+          JsonFormat, JsonPredicate, TypePredicate, JsonConstructor then children(node).all? { constant?(it) }
         when Function then FUNCTIONS.key?(node.name) && !AGGREGATES.include?(node.name) && children(node).all? { constant?(it) }
         when CaseExpression
           expression = prepared_case(node).first
@@ -767,6 +865,8 @@ module H2
         when ArrayElement then node.with(array: canonical(node.array), index: canonical(node.index))
         when QuantifiedArray then node.with(expression: canonical(node.expression), array: canonical(node.array))
         when WhenPredicate then node.with(predicate: canonical(node.predicate))
+        when JsonFormat, JsonPredicate, TypePredicate then node.with(expression: canonical(node.expression))
+        when JsonConstructor then node.with(arguments: node.arguments.map { canonical(it) })
         when CaseExpression
           node.with(operand: node.operand && canonical(node.operand),
             branches: node.branches.map { |condition, value| [canonical(condition), canonical(value)] }, fallback: canonical(node.fallback))

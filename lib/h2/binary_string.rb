@@ -14,6 +14,7 @@ module H2
       when String
         binary?(value) ? value.b : value.encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: "?").b
       when UUIDValue then value.bytes
+      when JsonValue then value.bytes
       when Integer
         name = source_type&.name || (Type::INTEGER_LIMITS.fetch("INTEGER").cover?(value) ? "INTEGER" : "BIGINT")
         format = INTEGER_PACK[name]

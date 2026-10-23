@@ -65,7 +65,7 @@ module H2
           [:literal, value]
         elsif (word = @scanner.scan(/[\p{L}_][\p{L}\p{N}_$]*/))
           [:word, word.upcase.freeze]
-        elsif (symbol = @scanner.scan(/<>|!=|<=|>=|\|\||::|\?\?\(|\?\?\)|[\[\](),.;?+*\/%=<>-]/))
+        elsif (symbol = @scanner.scan(/<>|!=|<=|>=|\|\||::|\?\?\(|\?\?\)|[\[\](),.;:?+*\/%=<>-]/))
           symbol = {"??(" => "[", "??)" => "]"}.fetch(symbol, symbol)
           [:symbol, symbol.freeze]
         else
@@ -161,10 +161,14 @@ module H2
             scale = (mantissa.split('.', 2)[1]&.length || 0) - exponent.to_i
             digits = mantissa.delete('.').sub(/\A0+/, '')
             precision = [digits.length, 1].max + [-scale, 0].max
-            DecimalLiteral.new(BigDecimal(decimal), precision, [scale, 0].max)
+            DecimalLiteral.new(BigDecimal(decimal), precision, [scale, 0].max, decimal.freeze)
           else
             Integer(decimal, 10)
           end
+        end
+        if value.is_a?(Integer) && @scanner.scan(/[lL]/)
+          raise Error.new(42001, "BIGINT literal out of range") unless Type::INTEGER_LIMITS.fetch("BIGINT").cover?(value)
+          value = TypedLiteral.new(value, Type.new("BIGINT", nil, 0), Type::INTEGER_LIMITS.fetch("INTEGER").cover?(value))
         end
         if @scanner.check(/[\p{L}\p{N}_$]/)
           raise Error.new(42001, "Invalid number at byte #{@scanner.pos}")

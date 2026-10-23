@@ -240,7 +240,7 @@ module H2
         evaluator = SQL::Evaluator.new([])
         element = ArrayType.element_common(values.map { evaluator.type_of(SQL::Literal.new(it)) })
         ArrayType.new(element, values.length).convert(ArrayValue.new(values, element), cast: true, context: @context)
-      when nil, true, false, Integer, BigDecimal, UUIDValue, DateValue, TimeValue, TimestampValue, TimeTimeZoneValue, TimestampTimeZoneValue, IntervalValue then value
+      when nil, true, false, Integer, BigDecimal, UUIDValue, JsonValue, DecfloatValue, DateValue, TimeValue, TimestampValue, TimeTimeZoneValue, TimestampTimeZoneValue, IntervalValue then value
       when Float
         raise Error.new(22018, "Non-finite parameter") unless value.finite?
 

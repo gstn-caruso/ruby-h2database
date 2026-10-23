@@ -26,6 +26,8 @@ module H2
             node = child.with(operator: QuantifiedComparisons::INVERSE.fetch(child.operator), all: !child.all)
           elsif child.is_a?(InQuery)
             node = child.with(negated: !child.negated)
+          elsif child.is_a?(JsonPredicate) || child.is_a?(TypePredicate)
+            node = child.with(negated: !child.negated)
           end
         end
         if node.is_a?(QuantifiedArray) && closed?(node) && @evaluator.constant_expression?(node)
@@ -54,7 +56,9 @@ module H2
         if node.is_a?(Cast) && type.is_a?(ArrayType) && value
           cast = type.precision != value.values.length || type.element_type != value.element_type
         elsif node.is_a?(Cast) && type.name == "VARCHAR" && relevant?(node.expression)
-          cast = type.precision != value.to_s.length
+          cast = type.precision != CharacterString.sort_key(value.to_s).bytesize / 2
+        elsif node.is_a?(Cast) && %w[BINARY VARBINARY].include?(type.name) && @evaluator.type_of(node.expression).name == "JSON"
+          cast = value.nil? || type.name == "BINARY" || type.precision != value.bytesize
         end
         if !node.is_a?(Cast) && Temporal.value?(value)
           type = Temporal.type(Temporal.name(value), 9)
@@ -136,7 +140,8 @@ module H2
         when TimeZoneExpression
           !node.zone.nil? && children(node).all? { foldable?(it) } &&
             @evaluator.type_of(node.expression).name.end_with?("WITH TIME ZONE")
-        when Unary, Binary, Predicate, RowConstructor, ArrayConstructor, ArrayElement, QuantifiedArray
+        when Unary, Binary, Predicate, RowConstructor, ArrayConstructor, ArrayElement, QuantifiedArray,
+          JsonFormat, JsonPredicate, TypePredicate, JsonConstructor
           children(node).all? { foldable?(it) }
         when Function
           Evaluator::FUNCTIONS.key?(node.name) && !Evaluator::AGGREGATES.include?(node.name) &&
@@ -146,6 +151,10 @@ module H2
       end
 
       def relevant?(node)
+        return true if node.is_a?(Literal) && node.value.is_a?(JsonValue)
+        return true if [JsonFormat, JsonPredicate, TypePredicate, JsonConstructor].any? { node.is_a?(it) }
+        return true if node.is_a?(Cast) && node.type.name == "JSON"
+        return true if node.is_a?(Cast) && node.type.name == "DECFLOAT"
         return true if node.is_a?(Cast) && node.type.name == "CHAR"
         return true if node.is_a?(Cast) && node.type.name == "NULL"
         return true if node.is_a?(Function) && ArrayFunctions::ARITIES.key?(node.name)

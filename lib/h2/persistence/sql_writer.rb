@@ -42,6 +42,8 @@ module H2
         when *(Temporal::NAMES - ["DATE"])
           value.name.sub(/\A(TIMESTAMP|TIME)/) { "#{it}(#{value.scale || (Temporal.time_type?(value.name) ? 0 : 6)})" }
         when "NUMERIC" then "NUMERIC(#{value.precision || 100_000},#{value.scale || 0})"
+        when "JSON" then SQLTypeName.format(value)
+        when "DECFLOAT" then SQLTypeName.format(value)
         when "VARCHAR", "CHAR", "BINARY", "VARBINARY" then value.precision ? "#{value.name}(#{value.precision})" : value.name
         else value.name
         end
@@ -59,6 +61,8 @@ module H2
             [Encoding::UTF_16BE, Encoding::UTF_16LE].include?(value.encoding) ? unicode_quote(value, "'") : "'#{value.gsub("'", "''")}'"
           end
         when UUIDValue then "UUID '#{value}'"
+        when JsonValue then value.sql
+        when DecfloatValue then value.sql
         when IntervalValue then value.to_s
         when DateValue, TimeValue, TimestampValue, TimeTimeZoneValue, TimestampTimeZoneValue then "#{Temporal.name(value)} '#{value}'"
         when BigDecimal then type&.name == "NUMERIC" ? ArrayType.decimal_text(value, type.scale) : value.to_s("F")
@@ -78,7 +82,7 @@ module H2
       def expression(node, parameters: [], ctes: [])
         render = ->(child) { expression(child, parameters: parameters, ctes: ctes) }
         case node
-        when SQL::DecimalLiteral then ArrayType.decimal_text(node.value, node.scale)
+        when SQL::DecimalLiteral then node.text || ArrayType.decimal_text(node.value, node.scale)
         when SQL::TypedLiteral
           if node.value.is_a?(BigDecimal) && node.type.name == "NUMERIC"
             text = ArrayType.decimal_text(node.value, node.type.scale)
@@ -125,6 +129,15 @@ module H2
           "(#{node.negated ? 'NOT (' + body + ')' : body})"
         when SQL::QuantifiedArray
           "(#{render.call(node.expression)} #{node.operator} #{node.all ? 'ALL' : 'ANY'}(#{render.call(node.array)}))"
+        when SQL::JsonFormat then "(#{render.call(node.expression)} FORMAT JSON)"
+        when SQL::JsonPredicate
+          "(#{render.call(node.expression)} IS#{node.negated ? ' NOT' : ''} JSON#{node.item_type == :value ? '' : ' ' + node.item_type.to_s.upcase}#{node.unique_keys ? ' WITH UNIQUE KEYS' : ''})"
+        when SQL::TypePredicate
+          "(#{render.call(node.expression)} IS#{node.negated ? ' NOT' : ''} OF (#{node.types.map { type(it) }.join(', ')}))"
+        when SQL::JsonConstructor
+          arguments = node.arguments.map { render.call(it) }
+          arguments = arguments.each_slice(2).map { |key, value| "#{key}: #{value}" } if node.kind == :object
+          "JSON_#{node.kind.to_s.upcase}(#{arguments.join(', ')}#{SQL::JsonFunctions.flags(node)})"
         when SQL::WhenPredicate
           predicate = node.predicate
           first = predicate.is_a?(SQL::Binary) ? predicate.left : (predicate.is_a?(SQL::Predicate) ? predicate.arguments.first : predicate.expression)
