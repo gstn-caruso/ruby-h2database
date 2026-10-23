@@ -146,6 +146,11 @@ class UpstreamTest < DatabaseTest
     [*(0..5), *(8..10)].each { check_case(script.cases.fetch(it)) }
   end
 
+  def test_original_quantified_array_comparisons_except_indexes_and_plans
+    script = UpstreamScript.new(File.join(ROOT, "predicates/quantified-comparison-with-array.sql"))
+    [*(0..5), 7, 9, 12, 14, 16, *(18..22)].each { check_case(script.cases.fetch(it)) }
+  end
+
   private
 
   def check_case(scenario)

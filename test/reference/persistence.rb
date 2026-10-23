@@ -186,6 +186,14 @@ schema.concat([
 queries.concat(["TABLE array_aggregates ORDER BY n", "TABLE array_aggregate_defaults ORDER BY a", "TABLE unnested ORDER BY nord", "TABLE unnest_unknown"])
 changes.concat(["INSERT INTO array_aggregate_defaults DEFAULT VALUES", "INSERT INTO array_aggregates SELECT ARRAY_AGG(a ORDER BY a),COUNT(*) FILTER(WHERE CARDINALITY(a)>0) FROM arrays"])
 
+schema.concat([
+  "CREATE TABLE quantified_defaults(a BOOLEAN DEFAULT 2=ANY(ARRAY[1,2,NULL]),q BOOLEAN DEFAULT 10>ALL(SELECT v FROM source),c INT DEFAULT CASE 1 WHEN =ANY(ARRAY[1,2]) THEN 1 ELSE 2 END)",
+  "INSERT INTO quantified_defaults DEFAULT VALUES",
+  "CREATE TABLE quantified_rows AS SELECT a,a=ANY(SELECT a FROM arrays) AS present,a IS DISTINCT FROM ALL(ARRAY[ARRAY[1]]) AS different FROM arrays"
+])
+queries.concat(["TABLE quantified_defaults ORDER BY q", "TABLE quantified_rows ORDER BY a"])
+changes.concat(["INSERT INTO quantified_defaults DEFAULT VALUES", "UPDATE quantified_rows SET different=a=ANY(ARRAY[ARRAY[2]])"])
+
 intervals = [
   ["YEAR", "1"], ["MONTH", "2"], ["DAY", "3"], ["HOUR", "4"], ["MINUTE", "5"], ["SECOND", "6.123456789"],
   ["YEAR TO MONTH", "1-2"], ["DAY TO HOUR", "1 2"], ["DAY TO MINUTE", "1 2:3"], ["DAY TO SECOND", "1 2:3:4.123456789"],

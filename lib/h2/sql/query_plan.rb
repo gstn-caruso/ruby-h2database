@@ -88,6 +88,7 @@ module H2
         when Unary then node.with(operand: resolve_alias(node.operand, aliases))
         when Binary, IntervalDifference then node.with(left: resolve_alias(node.left, aliases), right: resolve_alias(node.right, aliases))
         when Predicate, Function then node.with(arguments: node.arguments.map { resolve_alias(it, aliases) })
+        when QuantifiedArray then node.with(expression: resolve_alias(node.expression, aliases), array: resolve_alias(node.array, aliases))
         when Cast then node.with(expression: resolve_alias(node.expression, aliases))
         when TimeZoneExpression then node.with(expression: resolve_alias(node.expression, aliases), zone: node.zone && resolve_alias(node.zone, aliases))
         when ArrayConstructor then node.with(expressions: node.expressions.map { resolve_alias(it, aliases) })
@@ -323,7 +324,18 @@ module H2
           statement = node.query
           statement = statement.with(distinct: true) if statement.is_a?(Select) && !statement.limit && !statement.offset
           text = query(statement).lines.map { "    #{it}" }.join
-          "#{expression(node.expression, inside: true)} IN(#{text})"
+          if node.operator == "=" && !node.all
+            "#{expression(node.expression, inside: true)}#{node.negated ? ' NOT' : ''} IN(#{text})"
+          else
+            body = "#{expression(node.expression, inside: true)}#{node.all ? '' : ' '}#{node.operator} #{node.all ? 'ALL' : 'ANY'}(#{text})"
+            node.negated ? "NOT (#{body})" : body
+          end
+        when QuantifiedArray
+          "#{expression(node.expression, inside: true)} #{node.operator} #{node.all ? 'ALL' : 'ANY'}(#{expression(node.array, inside: true)})"
+        when WhenPredicate
+          predicate = node.predicate
+          first = predicate.is_a?(Binary) ? predicate.left : (predicate.is_a?(Predicate) ? predicate.arguments.first : predicate.expression)
+          expression(predicate, inside: true).delete_prefix(expression(first, inside: true)).lstrip
         when CaseExpression
           sql = node.operand ? "CASE #{expression(node.operand, inside: true)}" : "CASE"
           node.branches.each { |condition, value| sql += " WHEN #{expression(condition, inside: true)} THEN #{expression(value, inside: true)}" }
@@ -367,7 +379,7 @@ module H2
         when TableSource then "PUBLIC.#{node.name}"
         when RangeSource then "#{node.name}(#{node.arguments.map { expression(it, inside: true) }.join(', ')})"
         when UnnestSource then "UNNEST(#{node.arguments.map { expression(it, inside: true) }.join(', ')})#{node.ordinality ? ' WITH ORDINALITY' : ''}"
-        when AliasedSource then "#{source(node.source)} #{node.name}"
+        when AliasedSource then "#{source(node.source)} #{node.name.match?(/\A_\d+\z/) ? '"' + node.name + '"' : node.name}"
         when DerivedSource then "(#{query(node.query)})"
         else "JOIN"
         end

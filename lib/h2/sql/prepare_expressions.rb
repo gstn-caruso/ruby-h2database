@@ -14,8 +14,25 @@ module H2
         return node unless node.is_a?(Data) && node.class.name.start_with?("H2::SQL::")
         return node if node.is_a?(TypedLiteral) || node.is_a?(CapturedExpression)
 
+        if node.is_a?(WhenPredicate)
+          predicate = node.predicate.with(**node.predicate.to_h.transform_values { prepare(it) })
+          return node.with(predicate: predicate)
+        end
         return prepare_case(node) if node.is_a?(CaseExpression)
         node = node.with(**node.to_h.transform_values { prepare(it) })
+        if node.is_a?(Unary) && node.operator == "NOT"
+          child = node.operand
+          if child.is_a?(QuantifiedArray)
+            node = child.with(operator: QuantifiedComparisons::INVERSE.fetch(child.operator), all: !child.all)
+          elsif child.is_a?(InQuery)
+            node = child.with(negated: !child.negated)
+          end
+        end
+        if node.is_a?(QuantifiedArray) && closed?(node) && @evaluator.constant_expression?(node)
+          @evaluator.validate(node)
+          value = @evaluator.evaluate(node)
+          return TypedLiteral.new(value, Type.new("BOOLEAN", nil, nil), value.nil?)
+        end
         if node.is_a?(Binary) && %w[+ - * /].include?(node.operator) && closed?(node) && foldable?(node)
           @evaluator.validate(node)
           optimized = @evaluator.optimized_expression(node)
@@ -96,7 +113,7 @@ module H2
       end
 
       def closed?(node)
-        return false if [ColumnRef, BoundColumn, Parameter, CurrentDateTime, Subquery, Exists, InQuery, ArrayQuery, Aggregate, Star].any? { node.is_a?(it) }
+        return false if [ColumnRef, BoundColumn, Parameter, CurrentDateTime, Subquery, Exists, InQuery, ArrayQuery, Aggregate, Star, WhenPredicate].any? { node.is_a?(it) }
 
         children(node).all? { closed?(it) }
       end
@@ -119,7 +136,7 @@ module H2
         when TimeZoneExpression
           !node.zone.nil? && children(node).all? { foldable?(it) } &&
             @evaluator.type_of(node.expression).name.end_with?("WITH TIME ZONE")
-        when Unary, Binary, Predicate, RowConstructor, ArrayConstructor, ArrayElement
+        when Unary, Binary, Predicate, RowConstructor, ArrayConstructor, ArrayElement, QuantifiedArray
           children(node).all? { foldable?(it) }
         when Function
           Evaluator::FUNCTIONS.key?(node.name) && !Evaluator::AGGREGATES.include?(node.name) &&
@@ -129,6 +146,7 @@ module H2
       end
 
       def relevant?(node)
+        return true if node.is_a?(Cast) && node.type.name == "CHAR"
         return true if node.is_a?(Cast) && node.type.name == "NULL"
         return true if node.is_a?(Function) && ArrayFunctions::ARITIES.key?(node.name)
         return true if node.is_a?(ArrayConstructor) || node.is_a?(ArrayElement)

@@ -669,7 +669,7 @@ module H2
             negate = accept("NOT")
             if accept("DISTINCT")
               expect("FROM")
-              left = Predicate.new(negate ? :not_distinct : :distinct, [left, expression(5)])
+              left = comparison(left, negate ? "IS NOT DISTINCT FROM" : "IS DISTINCT FROM")
             else
               target = take.value
               syntax("NULL, TRUE, or FALSE") unless %w[NULL TRUE FALSE].include?(target)
@@ -686,7 +686,7 @@ module H2
             when "IN"
               expect("(")
               if query_start?
-                predicate = InQuery.new(left, query)
+                predicate = InQuery.new(left, query, "=", false, false)
               else
                 arguments = keyword?(")") ? [] : list { expression }
                 predicate = Predicate.new(:in, [left, *arguments])
@@ -721,10 +721,51 @@ module H2
             break unless precedence && precedence >= minimum
 
             operator = take.value
-            left = Binary.new(operator, left, expression(precedence + 1))
+            left = if %w[= <> != < > <= >=].include?(operator)
+              comparison(left, operator)
+            else
+              Binary.new(operator, left, expression(precedence + 1))
+            end
           end
         end
         left
+      end
+
+      def comparison(left, operator)
+        if %w[ANY ALL SOME].include?(current.value) && @tokens[@position + 1]&.value == "("
+          all = take.value == "ALL"
+          expect("(")
+          node = if query_start?
+            InQuery.new(left, query, operator == "!=" ? "<>" : operator, all, false)
+          else
+            QuantifiedArray.new(left, expression, operator == "!=" ? "<>" : operator, all)
+          end
+          expect(")")
+          node
+        elsif operator.start_with?("IS")
+          Predicate.new(operator == "IS DISTINCT FROM" ? :distinct : :not_distinct, [left, expression(5)])
+        else
+          Binary.new(operator, left, expression(5))
+        end
+      end
+
+      def case_condition(operand)
+        if operand && %w[= <> != < > <= >=].include?(current.value)
+          WhenPredicate.new(comparison(operand, take.value))
+        elsif operand && keyword?("IS")
+          take
+          negate = accept("NOT")
+          if accept("DISTINCT")
+            expect("FROM")
+            WhenPredicate.new(comparison(operand, negate ? "IS NOT DISTINCT FROM" : "IS DISTINCT FROM"))
+          else
+            target = take.value
+            syntax("NULL, TRUE, or FALSE") unless %w[NULL TRUE FALSE].include?(target)
+            WhenPredicate.new(Predicate.new(negate ? :is_not : :is, [operand, Literal.new({"NULL" => nil, "TRUE" => true, "FALSE" => false}.fetch(target))]))
+          end
+        else
+          expression
+        end
       end
 
       def predicate_start?
@@ -807,7 +848,7 @@ module H2
           operand = keyword?("WHEN") ? nil : expression
           branches = []
           while accept("WHEN")
-            condition = expression
+            condition = case_condition(operand)
             expect("THEN")
             branches << [condition, expression]
           end

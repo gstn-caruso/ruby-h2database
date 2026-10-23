@@ -124,7 +124,19 @@ H2.connect do |connection|
 end
 ```
 
-Cast `UNNEST` parameters explicitly to establish their column types. H2 reports NULL metadata for untyped parameters and other expressions without a statically known array type, even when their runtime values are non-null; aggregation and CTAS retain that behavior. Window aggregates, other table functions, quantified comparisons, compatibility modes and complete component metadata remain pending; [MIGRATION.md](MIGRATION.md) records the verified scope.
+Cast `UNNEST` parameters explicitly to establish their column types. H2 reports NULL metadata for untyped parameters and other expressions without a statically known array type, even when their runtime values are non-null; aggregation and CTAS retain that behavior.
+
+`ANY` / `SOME` and `ALL` compare against array elements or subquery rows using `=`, `<>`, `<`, `>`, `<=`, `>=`, `IS DISTINCT FROM` or `IS NOT DISTINCT FROM`. `ANY` returns false for an empty input; `ALL` returns true. A NULL array returns NULL. Other nulls follow SQL three-valued logic, with null-safe behavior for the DISTINCT operators. Scalars act as a single array element; a ROW remains one row value. Parameters can bind Ruby arrays directly:
+
+```ruby
+H2.connect do |connection|
+  p connection.execute("SELECT ?=ANY(?),?>ALL(?)", 2, [1, 2], 3, [1, 2]).rows
+  # => [[true, true]]
+  p connection.execute("SELECT 3>ALL(VALUES 1,2)").rows # => [[true]]
+end
+```
+
+Quantified predicates work in filters, joins, grouped queries, DML and saved defaults. Simple CASE accepts predicate branches such as `CASE v WHEN =ANY(a) THEN 1 ELSE 2 END`. Window aggregates, other table functions, compatibility modes and complete component metadata remain pending; [MIGRATION.md](MIGRATION.md) records the verified scope.
 
 ## Dates and times
 
