@@ -399,8 +399,10 @@ module H2
       end
 
       def session_date_comparison?(nodes)
-        nodes.map { type_of(it) }.combination(2).any? do |types|
-          target = Type.common(types)
+        first, *others = nodes.map { type_of(it) }
+        others.any? do |other|
+          types = [first, other]
+          target = Type.check_comparable(*types)
           types.any? { session_date_conversion?(target, it) }
         end
       end
