@@ -35,7 +35,7 @@ module H2
 
     def render(result, output)
       if result.query?
-        output.puts(result.columns.join("\t"))
+        output.puts(result.columns.map { format_value(it) }.join("\t"))
         result.rows.each { |row| output.puts(row.map { format_value(it) }.join("\t")) }
         count = result.rows.length
         output.puts("(#{count} #{count == 1 ? 'row' : 'rows'})")

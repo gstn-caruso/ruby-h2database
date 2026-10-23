@@ -10,6 +10,15 @@ module H2
     def self.common(types)
       types = types.compact.reject { it.name == "NULL" }
       return new("NULL", nil, nil) if types.empty?
+      if types.any? { it.is_a?(RowType) }
+        width = types.find { it.is_a?(RowType) }.fields.length
+        types = types.map { it.is_a?(RowType) ? it : RowType.new([it]) } if width == 1
+        unless types.all? { it.is_a?(RowType) && it.fields.length == types.first.fields.length }
+          raise Error.new(90110, "Row types are not comparable")
+        end
+
+        return RowType.new(Array.new(types.first.fields.length) { |index| common(types.map { it.fields[index] }) })
+      end
 
       name = types.max_by { ORDER.index(it.name) || -1 }.name
       precision = types.any? { it.precision.nil? } ? nil : types.map(&:precision).max

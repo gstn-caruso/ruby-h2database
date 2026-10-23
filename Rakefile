@@ -7,9 +7,9 @@ Rake::TestTask.new do |task|
 end
 
 namespace :test do
-  desc "Compare relational SQL against the built Java reference"
+  desc "Compare SQL fixtures against the built Java reference"
   task :reference do
-    ruby "test/reference/compare.rb"
+    Dir["test/fixtures/*_reference.sql"].sort.each { ruby "test/reference/compare.rb", it }
   end
 end
 
