@@ -113,11 +113,26 @@ end
 
 Ruby `Date` parameters become DATE; `Time` and `DateTime` parameters become TIMESTAMP by copying their displayed calendar/time components and nanoseconds. Their UTC offsets are not applied. Load Ruby's `date` library yourself when using Date/DateTime; the engine does not require it. Native temporal objects also work as parameters.
 
-The initial subset includes typed literals, component casts, comparisons, ordering, keys, set queries, persisted defaults/rows/indexes, integer-day and fractional-day arithmetic, DATE + TIME, TIME scaling, and calendar/time field extraction. `WITHOUT TIME ZONE` is accepted. Zoned types and text, TIME-to-TIMESTAMP conversion requiring the session date, intervals, remaining date/time functions and full temporal coercion remain pending and fail where unsupported. See [MIGRATION.md](MIGRATION.md) for the precise scope and reference evidence.
+The initial subset includes typed literals, component casts, comparisons, ordering, keys, set queries, persisted defaults/rows/indexes, integer-day and fractional-day arithmetic, DATE + TIME, TIME scaling, and calendar/time field extraction. `WITHOUT TIME ZONE` is accepted. Zoned types and text, TIME-to-TIMESTAMP conversion requiring the session date, remaining date/time functions and full temporal coercion remain pending and fail where unsupported. See [MIGRATION.md](MIGRATION.md) for the precise scope and reference evidence.
 
 `DATEADD(field, count, value)` (also `TIMESTAMPADD`) adds calendar units while clamping month/year changes to the last valid day. For example, `DATEADD(month, 1, DATE '2000-01-31')` returns `2000-02-29`. Subday units preserve nanoseconds, wrap TIME within its day, and promote DATE to TIMESTAMP. `DATEDIFF(field, start, finish)` (also `TIMESTAMPDIFF`) counts crossed unit boundaries and returns BIGINT; it does not measure a fractional duration. Field names are static identifiers or strings, while counts and values can be parameters. ISO weeks start Monday; the initial WEEK calendar starts Sunday. Locale-specific calendars and time-zone fields remain pending.
 
 `DATE_TRUNC(field, value)` discards smaller calendar/time fields without rounding; `DATE_TRUNC(month, DATE '2024-02-29')` returns `2024-02-01`. `LAST_DAY(value)` returns the month's final DATE, including leap years. `EXTRACT` also supports ISO week/year fields, signed-year periods and EPOCH, which returns `BigDecimal` seconds with nanosecond fractions. For unzoned timestamps, EPOCH uses calendar days and wall-clock time relative to `1970-01-01` without an offset adjustment. These functions work with parameters, CTAS and saved dynamic defaults; their type, scale and reference-specific behavior are detailed in [MIGRATION.md](MIGRATION.md).
+
+## Intervals
+
+All thirteen SQL interval qualifiers are available, from `INTERVAL YEAR` and `INTERVAL SECOND` through `INTERVAL YEAR TO MONTH` and `INTERVAL DAY TO SECOND`. Year/month intervals and day/time intervals form separate families. Results and parameters use immutable `H2::IntervalValue` objects; `.to_s` returns a canonical SQL interval literal, and `.absolute` returns signed months or nanoseconds according to the family.
+
+```ruby
+duration = H2::IntervalValue.parse("DAY TO SECOND", "1 02:03:04.123456789")
+H2.connect do |connection|
+  connection.execute("CREATE TABLE work(duration INTERVAL DAY(5) TO SECOND(9))")
+  connection.execute("INSERT INTO work VALUES(?)", duration)
+  p connection.execute("SELECT EXTRACT(HOUR FROM duration) FROM work").rows # => [[2]]
+end
+```
+
+Declarations default to two leading digits and six fractional-second digits; explicit precision supports 1–18 leading digits and scale 0–9. Literals retain full precision unless specified. Casts, comparisons, set queries, keys, defaults, ROW values, file persistence, interval arithmetic, `ABS`/`SUM`/`AVG` and component/EPOCH extraction have reference coverage. Unzoned datetime subtraction returns intervals; `(finish - start) YEAR TO MONTH` selects calendar-month differences. DATE plus a day/time interval discards partial days, and TIME arithmetic rejects results outside its day. Zoned arithmetic and conversions that require the current session date remain pending. [MIGRATION.md](MIGRATION.md) records the precise limits and preserved Java behavior.
 
 ## Persistent SQL databases
 
@@ -187,7 +202,7 @@ Existing `table.<object_id>` and `index.<object_id>` maps can be opened with inf
 
 `commit` appends a chunk and synchronizes it before publishing the duplicated file headers. `rollback` restores the last commit; handles for maps created after that commit become invalid. Closing a writable store commits pending changes, including the block form. Compression options are `:none`, `:fast` (LZF) and `:high` (DEFLATE). Read-only opens share a lock; a writable open excludes other readers and writers, including Java processes. File locking currently requires 64-bit Linux on x86_64 or aarch64; local and CI verification use x86_64.
 
-`H2::MVStore::Error#code` exposes MVStore error numbers, separately from SQL errors: 2 for write failures/read-only mutation, 4 for closed handles, 5 for unsupported formats or codecs, 6 for corruption, and 7 for conflicting locks. Remaining SQL lifecycle/transaction behavior, collations, encryption, external LOB content and compaction remain pending. Some typed-key comparisons, including non-ASCII case-insensitive strings and zoned temporal/interval keys, explicitly fail as unsupported. Opened maps currently materialize sorted entries and use binary search; each changed map is rewritten on commit.
+`H2::MVStore::Error#code` exposes MVStore error numbers, separately from SQL errors: 2 for write failures/read-only mutation, 4 for closed handles, 5 for unsupported formats or codecs, 6 for corruption, and 7 for conflicting locks. Remaining SQL lifecycle/transaction behavior, collations, encryption, external LOB content and compaction remain pending. Some typed-key comparisons, including non-ASCII case-insensitive strings and zoned temporal keys, explicitly fail as unsupported. Opened maps currently materialize sorted entries and use binary search; each changed map is rewritten on commit.
 
 ## MVStore transactions
 

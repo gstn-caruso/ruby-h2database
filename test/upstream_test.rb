@@ -94,9 +94,14 @@ class UpstreamTest < DatabaseTest
     ranges.each { |range| range.each { check_case(script.cases.fetch(it)) } }
   end
 
-  def test_original_extract_statements_except_types_zones_intervals_and_modes
+  def test_original_extract_statements_except_types_zones_and_modes
     script = UpstreamScript.new(File.join(ROOT, "functions/timeanddate/extract.sql"))
-    [*(2..12), 16, 30, 31, 60, 61, *(65..82)].each { check_case(script.cases.fetch(it)) }
+    [*(2..12), *(16..22), *(30..61), *(65..82)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_interval_values_casts_and_initial_arithmetic
+    script = UpstreamScript.new(File.join(ROOT, "datatypes/interval.sql"))
+    [0, 2, *(4..180), *(187..190), *(195..215), *(217..240), 245, 246, *(248..317)].each { check_case(script.cases.fetch(it)) }
   end
 
   private
@@ -141,7 +146,15 @@ class UpstreamTest < DatabaseTest
     when nil then "null"
     when true then "TRUE"
     when false then "FALSE"
-    when BigDecimal then type&.scale == 0 && value.frac.zero? ? value.to_i.to_s : value.to_s("F")
+    when BigDecimal
+      text = value.to_s("F")
+      if type&.scale == 0 && value.frac.zero?
+        value.to_i.to_s
+      elsif type&.scale.to_i.positive?
+        integer, fraction = text.split(".")
+        "#{integer}.#{fraction.to_s.ljust(type.scale, '0')}"
+      else text
+      end
     when String then H2::BinaryString.binary?(value) ? "X'#{value.unpack1('H*')}'" : value.gsub("\r\n", "\n").tr("\n", " ").gsub(/ +/, " ")
     else value.to_s
     end

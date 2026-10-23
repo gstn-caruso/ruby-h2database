@@ -2,7 +2,7 @@
 
 module H2
   class Type < Data.define(:name, :precision, :scale)
-    ORDER = %w[NULL CHAR VARCHAR BINARY VARBINARY BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE DATE TIME TIMESTAMP UUID].freeze
+    ORDER = (%w[NULL CHAR VARCHAR BINARY VARBINARY BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE DATE TIME TIMESTAMP] + Intervals::NAMES + ["UUID"]).freeze
     INTEGER_LIMITS = {"TINYINT" => (-128..127), "SMALLINT" => (-32_768..32_767),
       "INTEGER" => (-2_147_483_648..2_147_483_647),
       "BIGINT" => (-9_223_372_036_854_775_808..9_223_372_036_854_775_807)}.freeze
@@ -12,6 +12,14 @@ module H2
         left.fields.zip(right.fields).each { check_comparable(*it) }
       elsif left && right && !left.is_a?(RowType) && !right.is_a?(RowType)
         names = [left.name, right.name]
+        interval_names = names.select { Intervals.name?(it) }
+        if !interval_names.empty?
+          allowed = Intervals::NAMES + %w[NULL UNKNOWN CHAR VARCHAR]
+          families = interval_names.map { IntervalUnits.year_month?(IntervalUnits.ordinal(it.delete_prefix("INTERVAL "))) }
+          if (names - allowed).any? || families.uniq.length > 1
+            raise Error.new(90110, "SQL interval types are not comparable")
+          end
+        end
         binary = (names & %w[BINARY VARBINARY]).any?
         uuid = names.include?("UUID")
         temporal = (names & Temporal::NAMES).any?
@@ -42,6 +50,7 @@ module H2
 
         return RowType.new(Array.new(types.first.fields.length) { |index| common(types.map { it.fields[index] }) })
       end
+      return Intervals.common(types) if types.any? { Intervals.name?(it.name) }
 
       name = types.max_by { ORDER.index(it.name) || -1 }.name
       names = types.map(&:name)
@@ -105,6 +114,8 @@ module H2
       when *Temporal::NAMES
         value = Temporal.convert(value, name)
         name == "DATE" ? value : value.round(scale || (name == "TIME" ? 0 : 6))
+      when *Intervals::NAMES
+        Intervals.convert(value, Intervals.qualifier(self)).round(self)
       when "NUMERIC"
         decimal = BigDecimal(numeric_input(value).to_s)
         raise Error.new(22018, "Non-finite NUMERIC value") unless decimal.finite?
@@ -137,6 +148,8 @@ module H2
         with(precision: nil).convert(value, source_type: source_type)
       when *Temporal::NAMES
         Temporal.convert(value, name)
+      when *Intervals::NAMES
+        Intervals.convert(value, Intervals.qualifier(self))
       when "NUMERIC"
         number = BigDecimal(numeric_input(value).to_s)
         raise Error.new(22018, "Non-finite NUMERIC value") unless number.finite?
@@ -151,6 +164,7 @@ module H2
     private
 
     def numeric_input(value)
+      return value.to_d if value.is_a?(IntervalValue)
       if BinaryString.binary?(value) || value.is_a?(UUIDValue)
         raise Error.new(22018, "Cannot convert binary or UUID to #{name}")
       end
@@ -169,6 +183,7 @@ module H2
         return value.unpack1(format)
       end
       number = case value
+      when IntervalValue then value.to_i
       when Integer then value
       when Numeric then value.round(0, half: :up).to_i
       when true then 1
@@ -181,6 +196,7 @@ module H2
     end
 
     def boolean(value)
+      raise Error.new(22018, "Cannot convert INTERVAL to BOOLEAN") if value.is_a?(IntervalValue)
       if BinaryString.binary?(value) || value.is_a?(UUIDValue)
         raise Error.new(22018, "Cannot convert binary or UUID to BOOLEAN")
       end

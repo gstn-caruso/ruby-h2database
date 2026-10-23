@@ -188,7 +188,7 @@ module H2
         value = Temporal.from_ruby(value)
         case value
         when String then value.dup.freeze
-        when nil, true, false, Integer, BigDecimal, UUIDValue, DateValue, TimeValue, TimestampValue then value
+        when nil, true, false, Integer, BigDecimal, UUIDValue, DateValue, TimeValue, TimestampValue, IntervalValue then value
         when Float
           raise Error.new(22018, "Non-finite parameter") unless value.finite?
 
