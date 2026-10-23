@@ -65,7 +65,8 @@ module H2
           [:literal, value]
         elsif (word = @scanner.scan(/[\p{L}_][\p{L}\p{N}_$]*/))
           [:word, word.upcase.freeze]
-        elsif (symbol = @scanner.scan(/<>|!=|<=|>=|\|\||::|[(),.;?+*\/%=<>-]/))
+        elsif (symbol = @scanner.scan(/<>|!=|<=|>=|\|\||::|\?\?\(|\?\?\)|[\[\](),.;?+*\/%=<>-]/))
+          symbol = {"??(" => "[", "??)" => "]"}.fetch(symbol, symbol)
           [:symbol, symbol.freeze]
         else
           raise Error.new(42000, "Unexpected character at byte #{@scanner.pos}: #{@scanner.getch.inspect}")
@@ -155,7 +156,15 @@ module H2
           Integer(radix.delete("_"), 0)
         else
           decimal = @scanner.scan(/(?:\d(?:_?\d)*(?:\.(?:\d(?:_?\d)*)?)?|\.\d(?:_?\d)*)(?:[Ee][+-]?\d(?:_?\d)*)?/).delete("_")
-          decimal.match?(/[.Ee]/) ? BigDecimal(decimal) : Integer(decimal, 10)
+          if decimal.match?(/[.Ee]/)
+            mantissa, exponent = decimal.split(/[Ee]/)
+            scale = (mantissa.split('.', 2)[1]&.length || 0) - exponent.to_i
+            digits = mantissa.delete('.').sub(/\A0+/, '')
+            precision = [digits.length, 1].max + [-scale, 0].max
+            DecimalLiteral.new(BigDecimal(decimal), precision, [scale, 0].max)
+          else
+            Integer(decimal, 10)
+          end
         end
         if @scanner.check(/[\p{L}\p{N}_$]/)
           raise Error.new(42001, "Invalid number at byte #{@scanner.pos}")

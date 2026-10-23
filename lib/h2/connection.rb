@@ -24,7 +24,7 @@ module H2
 
     def prepare(sql)
       statement, parameter_count, generation = compile(sql)
-      PreparedStatement.new(self, statement, parameter_count, sql: sql, zone_generation: generation)
+      PreparedStatement.new(self, statement, parameter_count, sql: sql, zone_generation: generation, context: @context)
     end
 
     def compile(sql)
@@ -44,7 +44,7 @@ module H2
       parser = SQL::Parser.new(sql, context: @context)
       parser.parse_script do |statement, parameter_count|
         compiled = SQL::PrepareExpressions.new(@context, parameter_count).prepare(statement)
-        PreparedStatement.new(self, compiled, parameter_count).execute
+        PreparedStatement.new(self, compiled, parameter_count, context: @context).execute
       end
     end
 
@@ -203,12 +203,13 @@ module H2
   class PreparedStatement
     attr_reader :parameter_count
 
-    def initialize(connection, statement, parameter_count, sql: nil, zone_generation: nil)
+    def initialize(connection, statement, parameter_count, sql: nil, zone_generation: nil, context: nil)
       @connection = connection
       @statement = statement
       @parameter_count = parameter_count
       @sql = sql&.dup&.freeze
       @zone_generation = zone_generation
+      @context = context
     end
 
     def execute(*parameters)
@@ -218,19 +219,34 @@ module H2
       if parameters.length != parameter_count
         raise Error.new(7001, "Expected #{parameter_count} parameters, got #{parameters.length}")
       end
-      values = parameters.map do |value|
-        value = Temporal.from_ruby(value)
-        case value
-        when String then value.dup.freeze
-        when nil, true, false, Integer, BigDecimal, UUIDValue, DateValue, TimeValue, TimestampValue, TimeTimeZoneValue, TimestampTimeZoneValue, IntervalValue then value
-        when Float
-          raise Error.new(22018, "Non-finite parameter") unless value.finite?
-
-          value
-        else raise Error.new(22018, "Unsupported parameter type #{value.class}")
-        end
-      end
+      values = parameters.map { copy_parameter(it) }
       @connection.execute_prepared(@statement, values)
+    end
+
+    private
+
+    def copy_parameter(value, parents = [])
+      value = Temporal.from_ruby(value)
+      case value
+      when String then value.dup.freeze
+      when RowValue then RowValue.new(value.values.map { copy_parameter(it, parents) })
+      when ArrayValue
+        values = value.values.map { copy_parameter(it, parents) }
+        ArrayType.new(value.element_type, values.length).convert(ArrayValue.new(values, value.element_type), cast: true, context: @context)
+      when Array
+        raise Error.new(22018, "Recursive array parameter") if parents.any? { it.equal?(value) }
+
+        values = value.map { copy_parameter(it, [*parents, value]) }
+        evaluator = SQL::Evaluator.new([])
+        element = ArrayType.element_common(values.map { evaluator.type_of(SQL::Literal.new(it)) })
+        ArrayType.new(element, values.length).convert(ArrayValue.new(values, element), cast: true, context: @context)
+      when nil, true, false, Integer, BigDecimal, UUIDValue, DateValue, TimeValue, TimestampValue, TimeTimeZoneValue, TimestampTimeZoneValue, IntervalValue then value
+      when Float
+        raise Error.new(22018, "Non-finite parameter") unless value.finite?
+
+        value
+      else raise Error.new(22018, "Unsupported parameter type #{value.class}")
+      end
     end
   end
 end

@@ -46,13 +46,11 @@ module H2
             STRING.compare(left.data.upcase, right.data.upcase)
           when :boolean then (left.data ? 1 : 0) <=> (right.data ? 1 : 0)
           when :array, :row
-            left.data.zip(right.data).each do |a, b|
-              return -1 if b.nil?
-
+            left.data.first([left.data.length, right.data.length].min).zip(right.data).each do |a, b|
               result = compare(a, b)
               return result unless result.zero?
             end
-            right.data.length > left.data.length ? 1 : 0
+            left.data.length <=> right.data.length
           when :interval
             if IntervalUnits.year_month?(left.data[0]) != IntervalUnits.year_month?(right.data[0])
               raise Error.new(5, "Incompatible interval key families")

@@ -71,8 +71,8 @@ module H2
 
       def order_constant?(node)
         case node
-        when Literal, TypedLiteral then true
-        when Unary then %w[+ -].include?(node.operator) && node.operand.is_a?(Literal)
+        when Literal, TypedLiteral, DecimalLiteral then true
+        when Unary then %w[+ -].include?(node.operator) && [Literal, DecimalLiteral].any? { node.operand.is_a?(it) }
         when Cast then order_constant?(node.expression)
         when RowConstructor then node.expressions.all? { order_constant?(it) }
         else false
