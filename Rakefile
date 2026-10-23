@@ -30,6 +30,7 @@ namespace :test do
     ruby "test/reference/bit_functions.rb"
     ruby "test/reference/enum_values.rb"
     ruby "test/reference/row_values.rb"
+    ruby "test/reference/stream_store.rb"
     ruby "test/reference/mvstore.rb"
     ruby "test/reference/sql_storage.rb"
     ruby "test/reference/transactions.rb"

@@ -48,29 +48,13 @@ module H2
         end
       end
 
-      class UnsupportedType < Data.define(:class_name)
-        include Type
-
-        def copy(_value)
-          raise Error.new(5, "Storage codec #{class_name} has not been ported")
-        end
-        alias_method :read, :copy
-
-        def write(_buffer, value)
-          copy(value)
-        end
-
-        def compare(left, _right)
-          copy(left)
-        end
-      end
-
       class MetaType
         include Type
         STATELESS = {"org.h2.mvstore.type.StringDataType" => STRING, "org.h2.mvstore.type.LongDataType" => LONG,
           "org.h2.mvstore.type.ByteArrayDataType" => ByteArrayType.new.freeze,
-          "org.h2.mvstore.db.NullValueDataType" => NullType.new.freeze, "org.h2.mvstore.type.ObjectDataType" => OBJECT}.freeze
-        UNPORTED = %w[org.h2.mvstore.db.LobStorageMap$BlobMeta$Type org.h2.mvstore.db.LobStorageMap$BlobReference$Type].freeze
+          "org.h2.mvstore.db.NullValueDataType" => NullType.new.freeze, "org.h2.mvstore.type.ObjectDataType" => OBJECT,
+          "org.h2.mvstore.db.LobStorageMap$BlobMeta$Type" => BLOB_META,
+          "org.h2.mvstore.db.LobStorageMap$BlobReference$Type" => BLOB_REFERENCE}.freeze
 
         def copy(codec)
           raise ArgumentError, "Expected a storage codec" unless codec.is_a?(Type)
@@ -97,8 +81,6 @@ module H2
           elsif codec == VALUE
             STRING.write(buffer, "org.h2.mvstore.db.ValueDataType$Factory")
             buffer.write("\x00\x00\x00\x01".b)
-          elsif codec.is_a?(UnsupportedType) && UNPORTED.include?(codec.class_name)
-            STRING.write(buffer, codec.class_name)
           else
             raise Error.new(5, "Unregistered storage codec")
           end
@@ -107,7 +89,6 @@ module H2
         def read(buffer)
           name = STRING.read(buffer)
           return STATELESS[name] if STATELESS.key?(name)
-          return UnsupportedType.new(name) if UNPORTED.include?(name)
 
           case name
           when "org.h2.mvstore.db.RowDataType$Factory"
@@ -149,6 +130,7 @@ module H2
 
       META = MetaType.new.freeze
       BYTES = MetaType::STATELESS.fetch("org.h2.mvstore.type.ByteArrayDataType")
+      NULL = MetaType::STATELESS.fetch("org.h2.mvstore.db.NullValueDataType")
     end
   end
 end

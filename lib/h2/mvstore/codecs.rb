@@ -122,6 +122,9 @@ module H2
         return META if name == :meta
         return BYTES if name == :bytes
         return OBJECT if name == :object
+        return BLOB_META if name == :blob_meta
+        return BLOB_REFERENCE if name == :blob_reference
+        return NULL if name == :null
 
         TYPES.fetch(name) { raise Error.new(5, "Data type #{name.inspect} has not been ported") }
       end
