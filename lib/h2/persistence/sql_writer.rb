@@ -31,6 +31,7 @@ module H2
       end
 
       def type(value)
+        return Intervals.sql(value, explicit: true) if Intervals.name?(value.name)
         if value.is_a?(RowType)
           return "ROW(#{value.fields.each_with_index.map { |field, index| "#{identifier("C#{index + 1}")} #{type(field)}" }.join(', ')})"
         end
@@ -54,6 +55,7 @@ module H2
             [Encoding::UTF_16BE, Encoding::UTF_16LE].include?(value.encoding) ? unicode_quote(value, "'") : "'#{value.gsub("'", "''")}'"
           end
         when UUIDValue then "UUID '#{value}'"
+        when IntervalValue then value.to_s
         when DateValue, TimeValue, TimestampValue then "#{Temporal.name(value)} '#{value}'"
         when BigDecimal then value.to_s("F")
         when Integer then value.to_s
@@ -76,6 +78,7 @@ module H2
         when SQL::Star then node.qualifier ? "#{identifier(node.qualifier)}.*" : "*"
         when SQL::Unary then "(#{node.operator} #{render.call(node.operand)})"
         when SQL::Binary then "(#{render.call(node.left)} #{node.operator} #{render.call(node.right)})"
+        when SQL::IntervalDifference then "(#{render.call(node.left)} - #{render.call(node.right)}) #{Intervals.sql(node.type, explicit: true).delete_prefix('INTERVAL ')}"
         when SQL::Cast then "CAST(#{render.call(node.expression)} AS #{type(node.type)})"
         when SQL::Function
           if node.name == "EXTRACT"

@@ -220,6 +220,7 @@ module H2
       def parse_type
         name = take.value
         name = TYPE_NAMES.fetch(name, name)
+        return interval_type.first if name == "INTERVAL"
         return temporal_type(name) if Temporal::NAMES.include?(name)
         if name == "CHAR" && accept("VARYING")
           name = "VARCHAR"
@@ -254,6 +255,44 @@ module H2
           raise Error.new(90008, "Invalid precision or scale")
         end
         token.value
+      end
+
+      def interval_type
+        first = take.value
+        raise Error.new(42001, "Expected interval qualifier") unless %w[YEAR MONTH DAY HOUR MINUTE SECOND].include?(first)
+
+        precision, scale, explicit = 2, nil, false
+        if accept("(")
+          explicit = true
+          precision = interval_precision
+          scale = interval_scale if first == "SECOND" && accept(",")
+          expect(")")
+        end
+        qualifier = first
+        if accept("TO")
+          qualifier += " TO #{take.value}"
+          raise Error.new(42001, "Invalid interval qualifier") unless IntervalUnits::QUALIFIERS.include?(qualifier)
+          if qualifier.end_with?("SECOND") && accept("(")
+            explicit = true
+            scale = interval_scale
+            expect(")")
+          end
+        end
+        [Intervals.type(qualifier, precision, scale), explicit]
+      end
+
+      def interval_precision
+        value = positive_integer(allow_zero: true)
+        raise Error.new(90150, "Interval precision must be 1 through 18") unless (1..18).cover?(value)
+
+        value
+      end
+
+      def interval_scale
+        value = positive_integer(allow_zero: true)
+        raise Error.new(90151, "Interval scale must be 0 through 9") if value > 9
+
+        value
       end
 
       def temporal_type(name)
@@ -617,6 +656,8 @@ module H2
             left = negate ? Unary.new("NOT", node) : node
           elsif accept("::")
             left = Cast.new(left, parse_type)
+          elsif interval_qualifier?
+            left = Cast.new(left, interval_type.first)
           else
             precedence = current.kind == :word || current.kind == :symbol ? PRECEDENCE[current.value] : nil
             break unless precedence && precedence >= minimum
@@ -633,6 +674,10 @@ module H2
           (keyword?("NOT") && %w[BETWEEN IN LIKE].include?(@tokens[@position + 1]&.value))
       end
 
+      def interval_qualifier?
+        current.kind == :word && %w[YEAR MONTH DAY HOUR MINUTE SECOND].include?(current.value)
+      end
+
       def prefix
         token = take
         return Literal.new(token.value) if token.kind == :literal
@@ -642,6 +687,20 @@ module H2
         when "NULL" then Literal.new(nil)
         when "TRUE" then Literal.new(true)
         when "FALSE" then Literal.new(false)
+        when "INTERVAL"
+          negative = accept("-")
+          accept("+") unless negative
+          text = take
+          raise Error.new(42001, "Expected an interval string") unless text.kind == :literal && text.value.is_a?(String) && !BinaryString.binary?(text.value)
+
+          type, explicit = interval_type
+          begin
+            value = IntervalValue.parse(Intervals.qualifier(type), text.value, negative: negative)
+            value = value.round(type) if explicit
+          rescue Error
+            raise Error.new(22007, "Invalid INTERVAL literal")
+          end
+          explicit ? Cast.new(Literal.new(value), type) : Literal.new(value)
         when "DATE", "TIME", "TIMESTAMP"
           if current.kind == :literal || keyword?("WITH") || keyword?("WITHOUT")
             temporal_zone_suffix unless token.value == "DATE"
@@ -719,6 +778,9 @@ module H2
             end
           end
           expect(")")
+          if node.is_a?(Binary) && node.operator == "-" && interval_qualifier?
+            node = IntervalDifference.new(node.left, node.right, interval_type.first)
+          end
           node
         when "CAST"
           expect("(")

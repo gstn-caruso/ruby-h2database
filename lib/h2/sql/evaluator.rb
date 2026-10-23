@@ -69,7 +69,9 @@ module H2
           raise Error.new(42000, "Invalid expression #{node.class.name.split('::').last}")
         else
           children(node).each { validate(it, aggregates: aggregates, inside_aggregate: inside_aggregate) }
-          if node.is_a?(Binary) && %w[= <> != < > <= >=].include?(node.operator)
+          if node.is_a?(IntervalDifference)
+            type_of(node)
+          elsif node.is_a?(Binary) && %w[= <> != < > <= >=].include?(node.operator)
             Type.check_comparable(type_of(node.left), type_of(node.right))
           elsif node.is_a?(Binary) && %w[+ - * / %].include?(node.operator)
             type = type_of(node)
@@ -147,10 +149,13 @@ module H2
 
           case node.operator
           when "NOT" then !boolean(value)
-          when "+" then numeric(value)
-          when "-" then check_integer(-numeric(value), node)
+          when "+" then value.is_a?(IntervalValue) ? value : numeric(value)
+          when "-" then value.is_a?(IntervalValue) ? value.negate : check_integer(-numeric(value), node)
           end
         when Binary then binary(node, row, group)
+        when IntervalDifference
+          left, right = [node.left, node.right].map { evaluate(it, row, group) }
+          left.nil? || right.nil? ? nil : IntervalOperations.forced_difference(node.type, left, right)
         when Predicate then predicate(node, row, group)
         when Cast then node.type.convert(evaluate(node.expression, row, group), cast: true, source_type: type_of(node.expression))
         when Function then function(node, row, group)
@@ -202,7 +207,10 @@ module H2
           end
           return 0
         end
-        if Temporal.value?(left) || Temporal.value?(right)
+        if left.is_a?(IntervalValue) || right.is_a?(IntervalValue)
+          type = Type.check_comparable(type_of(Literal.new(left)), type_of(Literal.new(right)))
+          return Intervals.convert(left, Intervals.qualifier(type)).absolute <=> Intervals.convert(right, Intervals.qualifier(type)).absolute
+        elsif Temporal.value?(left) || Temporal.value?(right)
           Type.check_comparable(type_of(Literal.new(left)), type_of(Literal.new(right)))
           return Temporal.compare(left, right)
         elsif left.is_a?(UUIDValue) || right.is_a?(UUIDValue)
@@ -246,6 +254,11 @@ module H2
         when ColumnRef then scope.resolve(node).type
         when BoundColumn then node.binding.type
         when Cast then node.type
+        when IntervalDifference
+          unless [node.left, node.right].all? { Temporal::NAMES.include?(type_of(it).name) }
+            raise Error.new(42001, "An interval-qualified difference requires datetime operands")
+          end
+          IntervalOperations.type("-", type_of(node.left), type_of(node.right))
         when RowConstructor then RowType.new(node.expressions.map { type_of(it) })
         when Subquery
           plan = subquery_plan(node)
@@ -273,6 +286,7 @@ module H2
           when DateValue then Temporal.type("DATE")
           when TimeValue then Temporal.type("TIME", 9)
           when TimestampValue then Temporal.type("TIMESTAMP", 9)
+          when IntervalValue then Intervals.type(node.value.qualifier, 18, 9)
           when true, false then Type.new("BOOLEAN", nil, nil)
           when nil then Type.new("NULL", nil, nil)
           when RowValue then RowType.new(node.value.values.map { type_of(Literal.new(it)) })
@@ -288,6 +302,7 @@ module H2
           end
 
           types = [type_of(node.left), type_of(node.right)]
+          return IntervalOperations.type(node.operator, *types) if IntervalOperations.applicable?(node.operator, *types)
           return TemporalOperations.type(node.operator, *types) if types.any? { Temporal::NAMES.include?(it&.name) }
 
           type = Type.common(types)
@@ -301,7 +316,7 @@ module H2
       def children(node)
         case node
         when Unary then [node.operand]
-        when Binary then [node.left, node.right]
+        when Binary, IntervalDifference then [node.left, node.right]
         when Predicate, Function then node.arguments
         when Cast then [node.expression]
         when RowConstructor then node.expressions
@@ -317,6 +332,9 @@ module H2
       end
 
       def optimized_expression(node)
+        if node.is_a?(Cast) && Intervals.name?(node.type.name) && constant?(node.expression)
+          return node.with(expression: Literal.new(evaluate(node)))
+        end
         node = dateadd_expression(node) if node.is_a?(Binary)
         if node.is_a?(Subquery) && (plan = subquery_plan(node)).constant?
           Literal.new(constant_subquery(node, plan))
@@ -411,7 +429,7 @@ module H2
         case node
         when Literal then true
         when Subquery then subquery_plan(node).constant?
-        when Unary, Binary, Predicate, Cast, RowConstructor then children(node).all? { constant?(it) }
+        when Unary, Binary, IntervalDifference, Predicate, Cast, RowConstructor then children(node).all? { constant?(it) }
         when Function then FUNCTIONS.key?(node.name) && !AGGREGATES.include?(node.name) && children(node).all? { constant?(it) }
         when CaseExpression
           expression = prepared_case(node).first
@@ -471,7 +489,7 @@ module H2
         case node
         when ColumnRef then BoundColumn.new(scope.resolve(node))
         when Unary then node.with(operand: canonical(node.operand))
-        when Binary then node.with(left: canonical(node.left), right: canonical(node.right))
+        when Binary, IntervalDifference then node.with(left: canonical(node.left), right: canonical(node.right))
         when Predicate, Function then node.with(arguments: node.arguments.map { canonical(it) })
         when Cast then node.with(expression: canonical(node.expression))
         when RowConstructor then node.with(expressions: node.expressions.map { canonical(it) })
@@ -497,6 +515,9 @@ module H2
           return type
         end
         argument_type = type_of(node.arguments.first)
+        if %w[SUM AVG].include?(node.name) && argument_type && Intervals.name?(argument_type.name)
+          return IntervalOperations.aggregate_type(node.name, argument_type)
+        end
         case node.name
         when "COUNT", "LENGTH", "CHAR_LENGTH", "OCTET_LENGTH", "BIT_LENGTH" then Type.new("BIGINT", nil, 0)
         when "UPPER", "UCASE", "LOWER", "LCASE" then Type.new("VARCHAR", nil, nil)
@@ -557,6 +578,9 @@ module H2
         return nil if left.nil? || right.nil?
         if %w[+ - * / %].include?(node.operator)
           left_type, right_type = type_of(node.left), type_of(node.right)
+          if IntervalOperations.applicable?(node.operator, left_type, right_type)
+            return IntervalOperations.evaluate(node.operator, left, right, left_type, right_type)
+          end
           if [left_type, right_type].any? { Temporal::NAMES.include?(it&.name) }
             return TemporalOperations.evaluate(node.operator, left, right, left_type, right_type)
           end
@@ -695,7 +719,7 @@ module H2
         when "OCTET_LENGTH", "BIT_LENGTH"
           length = BinaryString.encode(first, source_type: type_of(node.arguments.first)).bytesize
           node.name == "BIT_LENGTH" ? length * 8 : length
-        when "ABS" then check_integer(numeric(first).abs, node)
+        when "ABS" then first.is_a?(IntervalValue) ? (first.negative ? first.negate : first) : check_integer(numeric(first).abs, node)
         when "MOD"
           raise Error.new(22012, "Division by zero") if numeric(second).zero?
 
@@ -711,6 +735,16 @@ module H2
         values = values.uniq if node.distinct
         return values.length if node.name == "COUNT"
         return nil if values.empty?
+        if %w[SUM AVG].include?(node.name) && Intervals.name?(type_of(argument).name)
+          type = function_type(node)
+          qualifier = Intervals.qualifier(type)
+          if node.name == "SUM"
+            value = values.reduce(nil) { |sum, item| sum ? IntervalValue.from_absolute(qualifier, sum.absolute + item.absolute) : Intervals.convert(item, qualifier) }
+          else
+            value = IntervalValue.from_absolute(qualifier, IntervalUnits.divide(values.sum(&:absolute), values.length))
+          end
+          return value.round(type)
+        end
 
         case node.name
         when "SUM" then values.sum { numeric(it) }

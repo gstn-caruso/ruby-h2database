@@ -148,6 +148,32 @@ changes = ["UPDATE people SET amount=amount+1 WHERE id=-7", "INSERT INTO people(
   "INSERT INTO periods DEFAULT VALUES",
   "INSERT INTO trunc_copy SELECT DATE_TRUNC(month,d),DATE_TRUNC(mcs,t),DATE_TRUNC(iso_week_year,ts),EXTRACT(epoch FROM ts),LAST_DAY(d) FROM calendar"]
 
+intervals = [
+  ["YEAR", "1"], ["MONTH", "2"], ["DAY", "3"], ["HOUR", "4"], ["MINUTE", "5"], ["SECOND", "6.123456789"],
+  ["YEAR TO MONTH", "1-2"], ["DAY TO HOUR", "1 2"], ["DAY TO MINUTE", "1 2:3"], ["DAY TO SECOND", "1 2:3:4.123456789"],
+  ["HOUR TO MINUTE", "1:2"], ["HOUR TO SECOND", "1:2:3.123456789"], ["MINUTE TO SECOND", "1:2.123456789"]
+]
+columns = intervals.each_with_index.map do |(qualifier, _text), index|
+  fields = qualifier.split(" TO ")
+  fields[0] += qualifier == "SECOND" ? "(5,9)" : "(5)"
+  fields[-1] += "(9)" if fields.length > 1 && fields[-1] == "SECOND"
+  "c#{index} INTERVAL #{fields.join(' TO ')}#{[6, 9].include?(index) ? ' UNIQUE' : ''}"
+end
+schema << "CREATE TABLE interval_types(id INT PRIMARY KEY,#{columns.join(',')})"
+rows = (0...4).map do |row|
+  values = intervals.map { |qualifier, text| row == 3 ? "NULL" : "INTERVAL '#{row == 2 ? '0' : "#{row == 1 ? '-' : ''}#{text}"}' #{qualifier}" }
+  "(#{row + 1},#{values.join(',')})"
+end
+schema << "INSERT INTO interval_types VALUES#{rows.join(',')}"
+schema << "CREATE TABLE interval_defaults(i INTERVAL DAY(5) TO SECOND(9) DEFAULT (SELECT MAX(c9) FROM interval_types),d INTERVAL YEAR(5) TO MONTH DEFAULT ((SELECT MAX(d) FROM calendar)-DATE '1999-01-01') YEAR TO MONTH)"
+schema << "INSERT INTO interval_defaults DEFAULT VALUES"
+schema << "CREATE TABLE interval_rows AS SELECT ROW(INTERVAL '1-6' YEAR TO MONTH,INTERVAL '-0.000000001' SECOND) AS pair"
+queries.concat(["TABLE interval_types ORDER BY id", "TABLE interval_defaults ORDER BY i", "TABLE interval_rows",
+  "SELECT id FROM interval_types WHERE c6=INTERVAL '14' MONTH", "SELECT SUM(c0) AS total,AVG(c2) AS average FROM interval_types"])
+changes.concat(["UPDATE interval_types SET c9=c9+INTERVAL '0.000000001' SECOND,c6=c6+INTERVAL '1' MONTH WHERE id=1",
+  "INSERT INTO interval_defaults DEFAULT VALUES", "DELETE FROM interval_types WHERE id=2",
+  "INSERT INTO interval_types(id,c6,c9) VALUES(5,INTERVAL '15' MONTH,INTERVAL '1' DAY)"])
+
 Dir.mktmpdir("sql-persistence-reference-") do |directory|
   [:none, :fast, :high].each do |compression|
     native = File.join(directory, "ruby-#{compression}")

@@ -86,7 +86,7 @@ module H2
         case node
         when ColumnRef then node.qualifier ? node : aliases.fetch(node.name, node)
         when Unary then node.with(operand: resolve_alias(node.operand, aliases))
-        when Binary then node.with(left: resolve_alias(node.left, aliases), right: resolve_alias(node.right, aliases))
+        when Binary, IntervalDifference then node.with(left: resolve_alias(node.left, aliases), right: resolve_alias(node.right, aliases))
         when Predicate, Function then node.with(arguments: node.arguments.map { resolve_alias(it, aliases) })
         when Cast then node.with(expression: resolve_alias(node.expression, aliases))
         else node
@@ -264,6 +264,7 @@ module H2
           when false then "FALSE"
           when String then BinaryString.binary?(node.value) ? "X'#{node.value.unpack1('H*')}'" : "'#{node.value.gsub("'", "''")}'"
           when UUIDValue then "UUID '#{node.value}'"
+          when IntervalValue then node.value.to_s
           when DateValue, TimeValue, TimestampValue then "#{Temporal.name(node.value)} '#{node.value}'"
           when BigDecimal then node.value.to_s("F")
           else node.value.to_s
@@ -279,10 +280,12 @@ module H2
             "#{node.name}(#{node.distinct ? 'DISTINCT ' : ''}#{node.arguments.map { expression(it, inside: true) }.join(', ')})"
           end
         when Binary then "#{expression(node.left, inside: true)} #{node.operator} #{expression(node.right, inside: true)}"
+        when IntervalDifference then "(#{expression(node.left, inside: true)} - #{expression(node.right, inside: true)}) #{Intervals.sql(node.type).delete_prefix('INTERVAL ')}"
         when Unary then "#{node.operator} #{expression(node.operand, inside: true)}"
         when Cast
           type = node.type
           name = type.name == "VARBINARY" ? "BINARY VARYING" : type.name
+          name = Intervals.sql(type) if Intervals.name?(type.name)
           name += "(#{type.precision})" if %w[BINARY VARBINARY].include?(type.name) && type.precision
           name += "(#{type.scale})" if %w[TIME TIMESTAMP].include?(type.name) && type.scale != (type.name == "TIME" ? 0 : 6)
           if type.name == "NUMERIC" && type.precision && [type.precision, type.scale] != [100_000, 0]

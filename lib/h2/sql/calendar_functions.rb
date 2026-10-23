@@ -96,6 +96,8 @@ module H2
       end
 
       def extract(field, value)
+        return value.extract(field) if value.is_a?(IntervalValue)
+
         date, nanos = DateTimeFunctions.components(value)
         case field
         when "YEAR" then date.year

@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "../../interval_units"
+
 module H2
   module MVStore
     module Codecs
@@ -50,7 +52,12 @@ module H2
               return result unless result.zero?
             end
             right.data.length > left.data.length ? 1 : 0
-          when :blob, :clob, :interval, :time_tz, :timestamp_tz
+          when :interval
+            if IntervalUnits.year_month?(left.data[0]) != IntervalUnits.year_month?(right.data[0])
+              raise Error.new(5, "Incompatible interval key families")
+            end
+            IntervalUnits.absolute(*left.data) <=> IntervalUnits.absolute(*right.data)
+          when :blob, :clob, :time_tz, :timestamp_tz
             raise Error.new(5, "Comparison of #{left.type} has not been ported")
           when :uuid then left.data <=> right.data
           else left.data <=> right.data

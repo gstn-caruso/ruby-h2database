@@ -12,6 +12,7 @@ module H2
     CapturedExpression = Data.define(:expression, :parameters)
     Unary = Data.define(:operator, :operand)
     Binary = Data.define(:operator, :left, :right)
+    IntervalDifference = Data.define(:left, :right, :type)
     Predicate = Data.define(:operator, :arguments)
     Function = Data.define(:name, :arguments, :distinct)
     Cast = Data.define(:expression, :type)

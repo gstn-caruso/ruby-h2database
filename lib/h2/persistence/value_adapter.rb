@@ -10,6 +10,9 @@ module H2
         if type.is_a?(RowType)
           return MVStore::Value.new(:row, type.fields.each_with_index.map { |field, index| encode(value.values[index], field) })
         end
+        if Intervals.name?(type.name)
+          return MVStore::Value.new(:interval, [value.ordinal, value.negative, value.leading, value.remaining])
+        end
         data = if type.name == "NUMERIC"
           scale = type.scale || 0
           MVStore::Decimal.new((value * (10**scale)).to_i, scale)
@@ -39,6 +42,7 @@ module H2
         when :date then DateValue.from_packed(value.data)
         when :time then TimeValue.new(value.data)
         when :timestamp then TimestampValue.new(DateValue.from_packed(value.data[0]), TimeValue.new(value.data[1]))
+        when :interval then IntervalValue.new(IntervalUnits::QUALIFIERS.fetch(value.data[0]), *value.data.drop(1))
         else value.to_ruby
         end
         type.convert(data)
