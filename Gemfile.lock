@@ -1,0 +1,40 @@
+PATH
+  remote: .
+  specs:
+    ruby-h2database (0.1.0.pre.1)
+      bigdecimal (>= 3.1, < 5)
+      optparse (>= 0.6, < 1)
+      strscan (~> 3.1)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    bigdecimal (4.0.1)
+    minitest (6.0.0)
+      prism (~> 1.5)
+    optparse (0.8.1)
+    prism (1.8.1)
+    rake (13.3.1)
+    strscan (3.1.6)
+
+PLATFORMS
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  minitest (>= 5.25, < 7)
+  rake (~> 13.3)
+  ruby-h2database!
+
+CHECKSUMS
+  bigdecimal (4.0.1) sha256=8b07d3d065a9f921c80ceaea7c9d4ae596697295b584c296fe599dd0ad01c4a7
+  bundler (4.0.20) sha256=7978a8ac648767f5e635bc522445b79e80a52b907a39a36c2d8085ed6bc762ae
+  minitest (6.0.0) sha256=4ca597fc1d735ea18d2b4b98c5fb1d5a6da4a6f35ddf32bd5fa3eded33a453be
+  optparse (0.8.1) sha256=42bea10d53907ccff4f080a69991441d611fbf8733b60ed1ce9ee365ce03bd1a
+  prism (1.8.1) sha256=b260c1844ee0c7ead9c938f7fd63b95888c87cc054dfb64043204eccff8116ac
+  rake (13.3.1) sha256=8c9e89d09f66a26a01264e7e3480ec0607f0c497a861ef16063604b1b08eb19c
+  ruby-h2database (0.1.0.pre.1)
+  strscan (3.1.6) sha256=ebd56df0b0468b00a1f2004b4078c34df58c3506b2bba939e7531892aece81f3
+
+BUNDLED WITH
+  4.0.20
