@@ -14,7 +14,7 @@ module H2
 
       def execute(statement)
         case statement
-        when Select, Values, Explain then @queries.execute(statement)
+        when Select, Values, SetQuery, Explain then @queries.execute(statement)
         when CreateTable then create(statement)
         when DropTable
           statement.names.each { table(it) } unless statement.if_exists

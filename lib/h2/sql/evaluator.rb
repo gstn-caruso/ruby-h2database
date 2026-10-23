@@ -16,6 +16,7 @@ module H2
         @scope = scope || Scope.for_columns(columns, qualifiers)
         @queries = queries
         @subqueries = {}
+        @constant_subqueries = {}
         @outer_bindings = []
         @group_correlations = []
         @cases = {}
@@ -152,11 +153,7 @@ module H2
         when RowConstructor then RowValue.new(node.expressions.map { evaluate(it, row, group) })
         when Subquery
           plan = subquery_plan(node)
-          result = plan.execute(row, max_rows: 2)
-          raise Error.new(90053, "Scalar subquery contains more than one row") if result.rows.length > 1
-
-          values = result.rows.first || Array.new(plan.columns.length)
-          values.length == 1 ? values.first : RowValue.new(values)
+          plan.constant? ? constant_subquery(node, plan) : scalar_value(plan, row)
         when Exists then !subquery_plan(node).execute(row, max_rows: 1).rows.empty?
         when InQuery
           value = evaluate(node.expression, row, group)
@@ -208,6 +205,8 @@ module H2
         elsif BinaryString.binary?(left) || BinaryString.binary?(right)
           Type.check_comparable(type_of(Literal.new(left)), type_of(Literal.new(right)))
           return left.b <=> right.b
+        elsif left.is_a?(String) && right.is_a?(String)
+          return CharacterString.sort_key(left) <=> CharacterString.sort_key(right)
         end
         if left.is_a?(Numeric) || right.is_a?(Numeric)
           left = numeric(left)
@@ -241,7 +240,9 @@ module H2
         when BoundColumn then node.binding.type
         when Cast then node.type
         when RowConstructor then RowType.new(node.expressions.map { type_of(it) })
-        when Subquery then query_type(subquery_plan(node))
+        when Subquery
+          plan = subquery_plan(node)
+          plan.constant? && constant_subquery(node, plan).nil? ? Type.new("NULL", nil, nil) : query_type(plan)
         when Exists, InQuery then Type.new("BOOLEAN", nil, nil)
         when CaseExpression then prepared_case(node).last
         when Parameter then type_of(Literal.new(@parameters.fetch(node.index)))
@@ -297,7 +298,31 @@ module H2
         end
       end
 
+      def constant_expression?(node)
+        constant?(node)
+      end
+
+      def optimized_expression(node)
+        if node.is_a?(Subquery) && (plan = subquery_plan(node)).constant?
+          Literal.new(constant_subquery(node, plan))
+        else
+          node
+        end
+      end
+
       private
+
+      def scalar_value(plan, row)
+        result = plan.execute(row, max_rows: 2)
+        raise Error.new(90053, "Scalar subquery contains more than one row") if result.rows.length > 1
+
+        values = result.rows.first || Array.new(plan.columns.length)
+        values.length == 1 ? values.first : RowValue.new(values)
+      end
+
+      def constant_subquery(node, plan)
+        @constant_subqueries.fetch(node) { @constant_subqueries[node] = scalar_value(plan, {}) }
+      end
 
       def case_children(node)
         [node.operand, *node.branches.flatten, node.fallback].compact
@@ -341,6 +366,7 @@ module H2
       def constant?(node)
         case node
         when Literal then true
+        when Subquery then subquery_plan(node).constant?
         when Unary, Binary, Predicate, Cast, RowConstructor then children(node).all? { constant?(it) }
         when Function then FUNCTIONS.key?(node.name) && !AGGREGATES.include?(node.name) && children(node).all? { constant?(it) }
         when CaseExpression

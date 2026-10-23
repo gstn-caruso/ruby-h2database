@@ -13,6 +13,17 @@ module H2
         @bounds.validate(statement.offset)
       end
 
+      def distinct_if_possible(outer_row)
+        rows = execute(outer_row).rows
+        return rows if @statement.limit || @statement.offset
+
+        RowSet.new(rows, types, @bounds).rows(preserve_order: !@statement.order.empty?)
+      end
+
+      def constant?
+        @order.empty? && [@statement.limit, @statement.offset].all? { it.nil? || @bounds.constant_expression?(it) }
+      end
+
       private
 
       def matches?(evaluator, expression, row, group = nil)
@@ -47,16 +58,24 @@ module H2
         aliases = projections.to_h { [it.label || label(it.expression), it.expression] }
         order.map do |ordering|
           node = ordering.expression
-          expression = if node.is_a?(Literal) && node.value.is_a?(Integer)
-            unless (1..projections.length).cover?(node.value)
-              raise Error.new(90068, "Invalid ORDER BY position #{node.value}")
-            end
-            projections.fetch(node.value - 1).expression
+          expression = if ordering.position
+            index, descending = order_position(ordering, projections.length)
+            ordering = ordering.with(descending: descending)
+            projections.fetch(index).expression
           else
             resolve_alias(node, aliases)
           end
           ordering.with(expression: expression)
         end
+      end
+
+      def order_position(ordering, width)
+        value = @bounds.evaluate(ordering.expression)
+        index = value.nil? ? 1 : Type.new("INTEGER", nil, nil).convert(value)
+        unless (1..width).cover?(index.abs)
+          raise Error.new(90068, "Invalid ORDER BY position #{index}")
+        end
+        [index.abs - 1, index.negative? ? !ordering.descending : ordering.descending]
       end
 
       def resolve_alias(node, aliases)
@@ -111,7 +130,7 @@ module H2
       end
 
       def label(node, inside: false)
-        Formatter.expression(node, inside: inside)
+        Formatter.expression(@evaluator.optimized_expression(node), inside: inside)
       end
     end
 
@@ -180,6 +199,11 @@ module H2
         entries = entries.first(max_rows) if max_rows
         result(entries.map(&:first))
       end
+
+      def constant?
+        super && !@statement.source && !@statement.where && !@grouped && !@statement.having &&
+          @projections.all? { @evaluator.constant_expression?(it.expression) }
+      end
     end
 
     class ValuesPlan < QueryPlan
@@ -212,6 +236,10 @@ module H2
         entries = paginate(entries, @statement.limit, @statement.offset, outer_row)
         entries = entries.first(max_rows) if max_rows
         result(entries.map(&:first))
+      end
+
+      def constant?
+        super && @statement.rows.flatten.all? { @evaluator.constant_expression?(it) }
       end
     end
 
@@ -256,6 +284,15 @@ module H2
 
       def query(node)
         case node
+        when SetQuery
+          operator = {union: "UNION", union_all: "UNION ALL", except: "EXCEPT", intersect: "INTERSECT"}.fetch(node.operator)
+          operands = [node.left, node.right].map do |operand|
+            if node.operator != :union_all && operand.is_a?(Select) && !operand.limit && !operand.offset
+              operand = operand.with(distinct: true)
+            end
+            query(operand)
+          end
+          "(#{operands[0]})\n#{operator}\n(#{operands[1]})"
         when Values
           "VALUES " + node.rows.map { |row| "(#{row.map { expression(it, inside: true) }.join(', ')})" }.join(", ")
         when Select

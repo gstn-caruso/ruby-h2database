@@ -52,6 +52,11 @@ class UpstreamTest < DatabaseTest
     [0, 2, *(7..20), *(28..31), 33, 36, 37].each { check_case(script.cases.fetch(it)) }
   end
 
+  def test_original_set_query_ordering_pagination_and_row_membership
+    script = UpstreamScript.new(File.join(ROOT, "queries/select.sql"))
+    [*(42..46), *(149..156)].each { check_case(script.cases.fetch(it)) }
+  end
+
   private
 
   def check_case(scenario)

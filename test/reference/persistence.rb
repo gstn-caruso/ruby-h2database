@@ -91,12 +91,16 @@ schema = [
   "CREATE TABLE binary_defaults(u UUID DEFAULT UUID 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', b VARBINARY DEFAULT X'ff00', small VARBINARY DEFAULT CAST(-1 AS SMALLINT))",
   "INSERT INTO binary_defaults DEFAULT VALUES",
   "CREATE TABLE empty_binary(v VARBINARY) AS SELECT X''",
-  "CREATE TABLE binary_rows AS SELECT ROW(UUID '01234567-89ab-cdef-0123-456789abcdef',X'ff00') AS pair"
+  "CREATE TABLE binary_rows AS SELECT ROW(UUID '01234567-89ab-cdef-0123-456789abcdef',X'ff00') AS pair",
+  "CREATE TABLE set_rows AS SELECT id FROM people UNION SELECT a FROM bag INTERSECT VALUES 1,2",
+  "CREATE TABLE set_default(v INT DEFAULT (SELECT v FROM source UNION ALL SELECT 5 ORDER BY (1) LIMIT 1))",
+  "INSERT INTO set_default DEFAULT VALUES"
 ]
 queries = ["TABLE people ORDER BY id", "TABLE pairs ORDER BY a,b", "TABLE bag ORDER BY a NULLS LAST,b NULLS LAST",
   "TABLE typed", "TABLE target", "TABLE rows_table", 'TABLE "odd""table"', "SELECT id FROM people WHERE name='Ada 😀'",
   "TABLE bytes ORDER BY u", "TABLE binary_defaults", "SELECT u FROM bytes WHERE v=X'00ffeda080'",
-  "TABLE empty_binary", "TABLE binary_rows"]
+  "TABLE empty_binary", "TABLE binary_rows", "TABLE set_rows ORDER BY id", "TABLE set_default ORDER BY v",
+  "SELECT id FROM set_rows INTERSECT SELECT id FROM people ORDER BY id"]
 changes = ["UPDATE people SET amount=amount+1 WHERE id=-7", "INSERT INTO people(id,name) VALUES(20,'new')",
   "DELETE FROM bag WHERE a IS NULL", "UPDATE bag SET b='updated' WHERE a=1", "INSERT INTO bag VALUES(2,'later')",
   "UPDATE source SET v=20", "INSERT INTO target DEFAULT VALUES", "INSERT INTO pairs VALUES('b',3,'z')",
@@ -105,7 +109,8 @@ changes = ["UPDATE people SET amount=amount+1 WHERE id=-7", "INSERT INTO people(
   "DELETE FROM bytes WHERE u=UUID 'ffffffff-ffff-ffff-ffff-ffffffffffff'",
   "INSERT INTO bytes(u,v) VALUES('11111111-1111-1111-1111-111111111111',X'00')",
   "INSERT INTO bytes(u,v) VALUES('22222222-2222-2222-2222-222222222222',X'80ff00')",
-  "INSERT INTO binary_defaults DEFAULT VALUES"]
+  "INSERT INTO binary_defaults DEFAULT VALUES", "INSERT INTO set_default DEFAULT VALUES",
+  "INSERT INTO set_rows SELECT id FROM people EXCEPT VALUES 0"]
 
 Dir.mktmpdir("sql-persistence-reference-") do |directory|
   [:none, :fast, :high].each do |compression|

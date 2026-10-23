@@ -5,7 +5,7 @@ module H2
     class Parser
       RESERVED = %w[ALL AND AS ASC BETWEEN BY CASE CAST CHECK CONSTRAINT CREATE CROSS DEFAULT DELETE DESC DISTINCT
         DROP ELSE END EXCEPT EXISTS FALSE FETCH FIRST FOREIGN FROM FULL GROUP HAVING IN INNER INSERT INTERSECT INTO
-        IS JOIN KEY LEFT LIKE LIMIT NATURAL NEXT NOT NULL NULLS OFFSET ON ONLY OR ORDER OUTER PRIMARY REFERENCES
+        IS JOIN KEY LEFT LIKE LIMIT MINUS NATURAL NEXT NOT NULL NULLS OFFSET ON ONLY OR ORDER OUTER PRIMARY REFERENCES
         RIGHT ROW ROWS SELECT SET TABLE THEN TRUE UNION UNIQUE UPDATE USING VALUE VALUES WHEN WHERE WITH].freeze
       PRECEDENCE = {"OR" => 1, "AND" => 2, "=" => 4, "<>" => 4, "!=" => 4, "<" => 4,
         ">" => 4, "<=" => 4, ">=" => 4, "||" => 5, "+" => 6, "-" => 6, "*" => 7, "/" => 7, "%" => 7}.freeze
@@ -257,7 +257,7 @@ module H2
       def insert
         expect("INTO")
         table = table_name
-        columns = keyword?("(") ? parenthesized_identifiers : nil
+        columns = keyword?("(") && !query_start? ? parenthesized_identifiers : nil
         if accept("DEFAULT")
           expect("VALUES")
           rows = [nil]
@@ -281,10 +281,61 @@ module H2
       end
 
       def query_start?
-        %w[SELECT TABLE VALUES].any? { keyword?(it) }
+        return true if %w[SELECT TABLE VALUES].any? { keyword?(it) }
+        return false unless keyword?("(")
+
+        start = @position
+        start += 1 while @tokens[start]&.kind == :symbol && @tokens[start].value == "("
+        return false unless @tokens[start]&.kind == :word && %w[SELECT TABLE VALUES].include?(@tokens[start].value)
+
+        depth = 0
+        @tokens[@position..].each_with_index do |token, index|
+          depth += 1 if token.kind == :symbol && token.value == "("
+          depth -= 1 if token.kind == :symbol && token.value == ")"
+          next unless depth.zero?
+
+          following = @tokens[@position + index + 1]
+          return !following || following.kind == :eof ||
+            ([:word, :symbol].include?(following.kind) && %w[UNION INTERSECT EXCEPT MINUS ORDER LIMIT OFFSET FETCH ) ;].include?(following.value))
+        end
+        false
       end
 
       def query
+        statement = query_term
+        loop do
+          operator = if accept("UNION")
+            if accept("ALL")
+              :union_all
+            else
+              accept("DISTINCT")
+              :union
+            end
+          elsif accept("EXCEPT") || accept("MINUS")
+            :except
+          else
+            break
+          end
+          statement = SetQuery.new(statement, query_term, operator, [], nil, nil)
+        end
+        order, limit, offset = query_tail
+        syntax("end of query") if statement.limit && (limit || offset)
+        changes = {}
+        changes[:order] = order unless order.empty?
+        changes[:limit] = limit if limit
+        changes[:offset] = offset if offset
+        changes.empty? ? statement : statement.with(**changes)
+      end
+
+      def query_term
+        statement = query_primary
+        while accept("INTERSECT")
+          statement = SetQuery.new(statement, query_primary, :intersect, [], nil, nil)
+        end
+        statement
+      end
+
+      def query_primary
         statement = if accept("(")
           nested = query
           expect(")")
@@ -294,12 +345,8 @@ module H2
           when "SELECT" then select
           when "VALUES" then values
           when "TABLE" then table_query
-          else syntax("query")
+          else raise Error.new(42001, "Expected query primary")
           end
-        end
-        order, limit, offset = query_tail
-        if !order.empty? || limit || offset
-          statement = statement.with(order: order, limit: limit, offset: offset)
         end
         statement
       end
@@ -418,7 +465,16 @@ module H2
         order = if accept("ORDER")
           expect("BY")
           list do
+            positional = (current.kind == :literal && current.value.is_a?(Integer)) || keyword?("?")
             node = expression
+            parameter = node
+            parameter = parameter.operand while parameter.is_a?(Unary) && parameter.operator == "+"
+            if parameter.is_a?(Parameter)
+              node = parameter
+              positional = true
+            else
+              positional &&= node.is_a?(Literal) && node.value.is_a?(Integer)
+            end
             descending = accept("DESC")
             accept("ASC") unless descending
             nulls = nil
@@ -430,7 +486,7 @@ module H2
                 nulls = :last
               end
             end
-            Ordering.new(node, descending, nulls)
+            Ordering.new(node, descending, nulls, positional)
           end
         else
           []

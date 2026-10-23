@@ -67,7 +67,7 @@ class CLITest < Minitest::Test
   def test_subquery_labels_and_row_values_are_rendered_in_one_record
     output = StringIO.new
     assert_equal 0, H2::CLI.new.run(["--execute", "SELECT (SELECT 1), ROW(2, NULL) AS pair;"], output: output)
-    assert_equal "(SELECT\\n    1)\tPAIR\n1\tROW (2, null)\n(1 row)\n", output.string
+    assert_equal "1\tPAIR\n1\tROW (2, null)\n(1 row)\n", output.string
   end
 
   def test_help_version_and_invalid_options

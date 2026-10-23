@@ -39,6 +39,21 @@ Scalar and correlated subqueries work in expressions, `EXISTS`, `IN`/`NOT IN`, i
 
 Query preparation validates reachable expressions and inner scopes before scanning rows. As in H2, derived tables, range arguments and pagination expressions cannot refer to an outer query. Defaults containing subqueries read the current data when used and retain any parameters supplied when the table was created.
 
+## Combining query results
+
+`UNION` / `UNION DISTINCT`, `UNION ALL`, `INTERSECT` and `EXCEPT` / `MINUS` combine `SELECT`, `TABLE` and `VALUES` queries. `INTERSECT` binds more tightly than the other operators; parentheses control grouping and branch pagination. Output names come from the left query, and each output column uses a common SQL type. Set conversion preserves numeric values and binary lengths without applying column-assignment padding or truncation.
+
+```ruby
+H2.connect do |connection|
+  result = connection.execute("VALUES 1, 1, 2 UNION VALUES 2, 3 ORDER BY 1 DESC")
+  p result.rows # => [[3], [2], [1]]
+end
+```
+
+`UNION` and `EXCEPT` eliminate duplicate rows, treating corresponding nulls as equal. `UNION ALL` retains duplicates. As in this H2 snapshot, `INTERSECT` can retain duplicate right-side rows when its branch is paginated or when conversion merges distinct source values. `INTERSECT ALL` and `EXCEPT ALL` are not supported by the reference. Outer ordering accepts output names and column positions, including bound position parameters; `ORDER BY (1)` is a constant, unlike `ORDER BY 1`.
+
+Set queries work in derived/scalar/correlated subqueries, membership predicates, CTAS, insert-select, DML expressions and persisted defaults. Constant scalar queries are evaluated during preparation, including their labels, null types and cardinality checks. Both branches currently materialize before the set operation and pagination; lazy unions, external results, complete plan formatting and optimizer behavior remain to port.
+
 ## Binary and UUID values
 
 `BINARY(n)` pads with zero bytes; `VARBINARY(n)` / `BINARY VARYING(n)` preserves length. Assignment rejects oversized values, while explicit casts truncate. SQL hexadecimal literals use `X'00ff'`; binary parameters and results use frozen copies of Ruby strings with `Encoding::BINARY` (`ASCII-8BIT`). Use `.b` when binding bytes. Text-to-binary conversion uses UTF-8. Binary-to-text conversion follows Java's UTF-8 replacement behavior for malformed input.
@@ -152,7 +167,7 @@ File-backed SQL commits use this storage API internally, while direct map transa
 
 ## SQL and command line
 
-The implemented subset includes table creation and deletion, `CREATE TABLE ... AS`, basic typed columns, defaults, primary and unique keys, `NOT NULL`, parameterized inserts, `INSERT ... SELECT`, updates, deletes, joins, derived tables, projections, filters, expressions, `VALUES`, ordering, pagination, grouping, distinct results and initial scalar and aggregate functions. `SYSTEM_RANGE`/`GENERATE_SERIES` supports ascending and descending ranges; simple counts and limited scans avoid materializing huge ranges. The supported subset is detailed in [MIGRATION.md](MIGRATION.md).
+The implemented subset includes table creation and deletion, `CREATE TABLE ... AS`, basic typed columns, defaults, primary and unique keys, `NOT NULL`, parameterized inserts, `INSERT ... SELECT`, updates, deletes, joins, derived tables, set queries, projections, filters, expressions, `VALUES`, ordering, pagination, grouping, distinct results and initial scalar and aggregate functions. `SYSTEM_RANGE`/`GENERATE_SERIES` supports ascending and descending ranges; simple counts and limited scans avoid materializing huge ranges. The supported subset is detailed in [MIGRATION.md](MIGRATION.md).
 
 ```sh
 bundle exec h2 --execute "SELECT 1 + 2 AS answer;"
@@ -172,7 +187,7 @@ mvn -q -f h2/pom.xml -DskipTests package
 bundle exec rake test:reference
 ```
 
-This checks the relational, subquery and binary/UUID SQL fixtures against both engines, including result labels, type names, rows, update counts, errors and SQL states. Top-level binary result columns are compared byte-for-byte through JDBC `getBytes`, and a generated UTF-8 comparison covers every byte pair plus multibyte boundaries. It also cross-reads and cross-writes MVStore files with all three compression modes, checks B-tree lookups, preserves unopened maps, verifies file locks in both directions, and recovers commits after process death. Storage tests exercise real SQL rows/indexes and prepared transactions. The persistent SQL suite creates databases with each engine, exchanges SQL changes, reopens through both engines, verifies defaults/keys/row ids/credentials/DDL, and kills writers before commit, after commit and after the durable decision. The reference task reports the Java commit-marker recovery and zero-precision metadata limitations explicitly. Java is used only by this optional reference check; the Ruby runtime and native test suite do not require it. CI runs the reference comparison separately on Ruby 3.4 and 4.0.
+This checks the relational, subquery, binary/UUID and set-query SQL fixtures against both engines, including result labels, type names, rows, update counts, errors and SQL states. Generated set cases additionally check type families, duplicate/null semantics, precedence and JDBC prepared ordering. Top-level binary result columns are compared byte-for-byte through JDBC `getBytes`, and a generated UTF-8 comparison covers every byte pair plus multibyte boundaries. It also cross-reads and cross-writes MVStore files with all three compression modes, checks B-tree lookups, preserves unopened maps, verifies file locks in both directions, and recovers commits after process death. Storage tests exercise real SQL rows/indexes and prepared transactions. The persistent SQL suite creates databases with each engine, exchanges SQL changes, reopens through both engines, verifies defaults/keys/row ids/credentials/DDL, and kills writers before commit, after commit and after the durable decision. The reference task reports the Java commit-marker recovery and zero-precision metadata limitations explicitly. Java is used only by this optional reference check; the Ruby runtime and native test suite do not require it. CI runs the reference comparison separately on Ruby 3.4 and 4.0.
 
 ## Upstream and license
 

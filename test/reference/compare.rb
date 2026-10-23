@@ -12,7 +12,7 @@ abort "Build the Java reference first: mvn -f h2/pom.xml -DskipTests package" un
 
 java = ENV["JAVA_HOME"] ? File.join(ENV.fetch("JAVA_HOME"), "bin/java") : "java"
 fixture = ARGV.first || File.join(root, "test/fixtures/relational_reference.sql")
-statements = File.readlines(fixture).map(&:strip).reject { it.empty? || it.start_with?("--") }
+statements = (fixture == "-" ? $stdin.readlines : File.readlines(fixture)).map(&:strip).reject { it.empty? || it.start_with?("--") }
 decode = ->(text) { text.unpack1("m0").force_encoding(Encoding::UTF_8) }
 input = statements.map { [it].pack("m0") }.join("\n") + "\n"
 output, error, status = Open3.capture3(java, "-cp", jar, File.join(__dir__, "JdbcOracle.java"), stdin_data: input)
