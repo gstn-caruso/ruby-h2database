@@ -62,6 +62,7 @@ module H2
 
     def convert(value, cast: false, source_type: nil, context: nil)
       return nil if value.nil?
+      value, source_type = scalar_source(value,source_type)
 
       source = source_type.is_a?(ArrayType) ? source_type.element_type : source_type
       values = value.is_a?(ArrayValue) ? value.values : [value]
@@ -76,10 +77,21 @@ module H2
 
     def coerce(value, source_type: nil, context: nil)
       return nil if value.nil?
+      value, source_type = scalar_source(value,source_type)
 
       source = source_type.is_a?(ArrayType) ? source_type.element_type : source_type
       values = value.is_a?(ArrayValue) ? value.values : [value]
       ArrayValue.new(values.map { element_type.coerce(it, source_type: source, context: context) }, element_type)
+    end
+
+    private
+
+    def scalar_source(value, type)
+      case value
+      when BlobValue then [value.bytes,Type.new('VARBINARY',value.precision,nil)]
+      when ClobValue then [value.to_s,Type.new('VARCHAR',value.precision,nil)]
+      else [value,type]
+      end
     end
   end
 end

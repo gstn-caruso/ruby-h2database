@@ -2,7 +2,7 @@
 
 module H2
   module SQLTypeName
-    ALIASES = {"VARCHAR" => "CHARACTER VARYING", "CHAR" => "CHARACTER", "VARBINARY" => "BINARY VARYING", "DOUBLE" => "DOUBLE PRECISION"}.freeze
+    ALIASES = {"VARCHAR" => "CHARACTER VARYING", "CHAR" => "CHARACTER", "VARBINARY" => "BINARY VARYING", "DOUBLE" => "DOUBLE PRECISION", "BLOB" => "BINARY LARGE OBJECT", "CLOB" => "CHARACTER LARGE OBJECT"}.freeze
     module_function
 
     def metadata(type, nested: false)
@@ -36,7 +36,9 @@ module H2
       if type.declared_name == "FLOAT"
         return name + (type.declared_precision ? "(#{type.declared_precision})" : '')
       end
-      if type.name == "JSON" && type.precision && type.precision != JsonValue::MAX_PRECISION
+      if LobValues::NAMES.include?(type.name)
+        name += "(#{type.precision})" if type.declared_precision || (type.precision && type.precision != LobValues::MAX_PRECISION)
+      elsif type.name == "JSON" && type.precision && type.precision != JsonValue::MAX_PRECISION
         name += "(#{type.precision})"
       elsif type.name == "DECFLOAT" && type.precision && type.precision != 100_000
         name += "(#{type.precision})"

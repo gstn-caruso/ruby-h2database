@@ -15,7 +15,12 @@ module H2
       raise Error.new(42121, "Duplicate column #{duplicates.first}") if duplicates
       raise Error.new(90017, "Multiple primary keys") if keys.count(&:primary) > 1
 
-      keys.each { |key| validate_columns(key.columns) }
+      keys.each do |key|
+        validate_columns(key.columns)
+        if key.columns.any? { |name| LobValues.contains?(columns.find { it.name == name }.type) }
+          raise Error.new(50100,'Indexes on LOB columns are unsupported')
+        end
+      end
     end
 
     def copy

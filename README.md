@@ -95,6 +95,32 @@ end
 
 `UUID '...'` supplies a typed literal. UUID casts accept H2's textual UUID form or exactly 16 binary bytes. `H2::UUIDValue` is immutable, exposes `.bytes`, and formats canonical lowercase text with `.to_s`. Both types work in defaults, key constraints, comparisons, ordering, initial ROW values and persisted tables/indexes. Integer/binary casts retain signed big-endian widths. `LENGTH` / `CHAR_LENGTH`, `OCTET_LENGTH` and `BIT_LENGTH` distinguish character, binary, integer and UUID representations. Full type metadata, UUID generation functions and remaining binary functions still need migration. Empty binary columns inferred by native CTAS use precision 1 so their saved declarations can reopen; the Java snapshot's zero-precision metadata limitation is recorded in [MIGRATION.md](MIGRATION.md).
 
+## BLOB and CLOB values
+
+`BLOB` / `BINARY LARGE OBJECT` stores bytes; `CLOB` / `CHARACTER LARGE OBJECT` stores text as UTF-8. Limits default to 9,223,372,036,854,775,807 bytes or UTF-16 code units. Declarations accept `K`, `M`, `G`, `T` and `P` suffixes with powers of 1024. Assignment rejects oversized values; casts truncate, replacing a split surrogate with `?`. `TINYBLOB`, `MEDIUMBLOB`, `LONGBLOB`, `IMAGE`, `NCLOB` and the national-character large-object aliases are also accepted.
+
+```ruby
+blob = H2::BlobValue.new("\x00\xff".b * 1000)
+clob = H2::ClobValue.parse("😀café" * 1000)
+
+H2.connect(path: "documents") do |connection|
+  connection.execute("CREATE TABLE documents(id INT PRIMARY KEY, data BLOB(1M), text CLOB(1M))")
+  connection.execute("INSERT INTO documents VALUES(?, ?, ?)", 1, blob, clob)
+end
+
+H2.connect(path: "documents", read_only: true) do |connection|
+  data, text = connection.execute("SELECT data, text FROM documents").rows.first
+  p data.bytes.bytesize # => 2000
+  p text.characters    # => 6000
+end
+```
+
+Results and explicit parameters use immutable `H2::BlobValue` / `H2::ClobValue` objects. Both expose frozen `.bytes`; CLOB additionally exposes `.characters` and `.to_s` text. `ClobValue.parse` accepts UTF-8 or UTF-16 text. BLOB `.to_s` follows H2's UTF-8 decoding with replacement; the CLI displays its bytes as `X'...'`. Plain binary/text parameters are converted by their target column type.
+
+LOB values work in arrays, ROW fields, comparisons, grouping, aggregates, set queries and persisted defaults. BLOB compares with binary strings and CLOB with character strings. `||` produces VARBINARY or VARCHAR. `CHAR_LENGTH` counts BLOB bytes or CLOB UTF-16 units; `OCTET_LENGTH` counts stored bytes. CLOB-to-JSON casts create a JSON string, while `FORMAT JSON` parses text; BLOB-to-JSON casts parse bytes. Direct BLOB-to-VARCHAR and LOB-to-numeric casts reject unsupported conversions. Primary/unique keys containing LOBs, including nested ones, are rejected as in H2.
+
+File-backed SQL stores payloads over 256 bytes through the native LOB maps, including nested values. Copies share stream blocks, unchanged fields retain their ids, and commit/rollback plus a persistent cleanup journal protect referenced data during recovery. Results currently materialize their bytes in memory. Streaming SQL parameters/results, JDBC-style LOB objects, full MVCC, remaining conversions/metadata and resource limits remain pending. Java's committed-decision and empty inferred LOB catalog defects are recorded separately in [MIGRATION.md](MIGRATION.md).
+
 ## Arrays
 
 Declare an element type followed by `ARRAY` or `ARRAY[n]`; repeated suffixes declare nested arrays. Cardinality defaults to 65,536 and can be zero. SQL constructors use `ARRAY[...]` or `ARRAY(single_column_query)`. A query constructor preserves query ordering and returns a typed empty array when no rows match.
@@ -159,7 +185,7 @@ end
 
 `IS [NOT] JSON` accepts VALUE, ARRAY, OBJECT or SCALAR and optional unique-key validation. `IS [NOT] OF(type, ...)` tests SQL type identity. JSON array indexing starts at 1 and returns SQL NULL outside the array; `UNNEST` returns JSON elements, including JSON `null`. JSON keys compare normalized bytes, so `JSON '1'` and `JSON '1.0'` remain distinct. Tables, key indexes, nested SQL arrays, constructors and query defaults reopen through native storage and JDBC.
 
-JSON aggregates, LOB/geometry conversions, compatibility modes and general optimization remain pending; see [MIGRATION.md](MIGRATION.md).
+JSON aggregates, geometry conversions, remaining LOB conversions, compatibility modes and general optimization remain pending; see [MIGRATION.md](MIGRATION.md).
 
 ## Decimal floating point
 
@@ -446,7 +472,7 @@ end
 
 `open(value)` handles inline and external data and accepts an ensure-close block. `get_input_stream(lob_id, table_id: nil)` opens an external id, searching temporary then permanent metadata when no table id is supplied. Missing ids raise MVStore error 50. External readers expose the stream methods above and pin their storage version until closed. `remove_lob(value)` queues removal; `cleanup(oldest_version: store.version)` removes entries strictly older than that version, respecting reader pins. `remove_all_for_table(table_id)` removes that table's references, waiting for active readers; any temporary table id selects all temporary references. Blocks remain until their final reference is removed.
 
-Use one active LOB manager per raw store; a second raises MVStore error 103. Close it before closing the raw store. Its block form closes readers, removes temporary references and finishes queued removals, while leaving the raw store open. Permanent references survive reopen, and existing LOB maps support read-only access. LOB operations serialize through the manager and store monitors. SQL BLOB/CLOB declarations, conversions, JDBC-style LOB objects, transaction rollback coordination, crash recovery of cleanup and resource limits remain pending. The removal queue is in memory and is not automatically enlisted in `TransactionStore` transactions.
+Use one active LOB manager per raw store; a second raises MVStore error 103. Close it before closing the raw store. Its block form closes readers, removes temporary references and finishes queued removals, while leaving the raw store open. Permanent references survive reopen, and existing LOB maps support read-only access. LOB operations serialize through the manager and store monitors. The raw manager's removal queue is in memory and is not automatically enlisted in arbitrary `TransactionStore` transactions. File-backed SQL supplies the durable reference coordination described above. JDBC-style LOB objects, full MVCC and resource limits remain pending.
 
 ## MVStore transactions
 

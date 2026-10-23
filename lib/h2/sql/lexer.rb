@@ -230,7 +230,7 @@ module H2
           raise Error.new(42001, "BIGINT literal out of range") unless Type::INTEGER_LIMITS.fetch("BIGINT").cover?(value)
           value = TypedLiteral.new(value, Type.new("BIGINT", nil, 0), Type::INTEGER_LIMITS.fetch("INTEGER").cover?(value))
         end
-        if @scanner.check(/[\p{L}\p{N}_$]/)
+        if @scanner.check(/[\p{L}\p{N}_$]/) && !@scanner.check(/[kKmMgGtTpP](?![\p{L}\p{N}_$])/)
           raise Error.new(42001, "Invalid number at byte #{@scanner.pos}")
         end
 

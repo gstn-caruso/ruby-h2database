@@ -6,7 +6,7 @@ module H2
       super
     end
 
-    ORDER = (%w[NULL CHAR VARCHAR BINARY VARBINARY BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE DECFLOAT] + Temporal::NAMES + Intervals::NAMES + %w[JSON UUID]).freeze
+    ORDER = (%w[NULL CHAR VARCHAR CLOB BINARY VARBINARY BLOB BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE DECFLOAT] + Temporal::NAMES + Intervals::NAMES + %w[JSON UUID]).freeze
     INTEGER_LIMITS = {"TINYINT" => (-128..127), "SMALLINT" => (-32_768..32_767),
       "INTEGER" => (-2_147_483_648..2_147_483_647),
       "BIGINT" => (-9_223_372_036_854_775_808..9_223_372_036_854_775_807)}.freeze
@@ -64,14 +64,14 @@ module H2
             raise Error.new(90110, "SQL interval types are not comparable")
           end
         end
-        binary = (names & %w[BINARY VARBINARY]).any?
+        binary = (names & %w[BINARY VARBINARY BLOB]).any?
         uuid = names.include?("UUID")
         temporal = (names & Temporal::NAMES).any?
         if temporal && ((names - (%w[NULL UNKNOWN CHAR VARCHAR] + Temporal::NAMES)).any? ||
             (names.include?("DATE") && names.any? { Temporal.time_type?(it) }))
           raise Error.new(90110, "SQL temporal types are not comparable")
         end
-        if (binary && (names - %w[NULL UNKNOWN BINARY VARBINARY JSON UUID]).any?) ||
+        if (binary && (names - %w[NULL UNKNOWN BINARY VARBINARY BLOB JSON UUID]).any?) ||
             (uuid && (names - %w[NULL UNKNOWN CHAR VARCHAR BINARY VARBINARY UUID]).any?)
           raise Error.new(90110, "SQL types #{names.join(', ')} are not comparable")
         end
@@ -114,7 +114,7 @@ module H2
         name = Temporal.common_name(names)
       end
       if (names.include?("UUID") && (names - %w[UUID CHAR VARCHAR BINARY VARBINARY]).any?) ||
-          ((names & %w[BINARY VARBINARY]).any? && (names & %w[BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE DECFLOAT]).any?)
+          ((names & %w[BINARY VARBINARY BLOB]).any? && (names & %w[BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE DECFLOAT]).any?)
         raise Error.new(22018, "Incompatible SQL types #{names.join(', ')}")
       end
       precision = types.any? { it.precision.nil? } ? nil : types.map(&:precision).max
@@ -134,11 +134,19 @@ module H2
 
     def convert(value, cast: false, source_type: nil, context: nil)
       return nil if value.nil?
-      if value.is_a?(JsonValue) && !%w[NULL CHAR VARCHAR BINARY VARBINARY JSON].include?(name)
+      if LobValues.value?(value) && !(LobValues::NAMES + %w[CHAR VARCHAR BINARY VARBINARY JSON]).include?(name)
+        raise Error.new(22018,"Cannot convert LOB to #{name}")
+      end
+      if value.is_a?(BlobValue) && %w[CHAR VARCHAR].include?(name)
+        raise Error.new(22018,"Cannot convert BLOB to #{name}")
+      end
+      if value.is_a?(JsonValue) && !%w[NULL CHAR VARCHAR CLOB BINARY VARBINARY BLOB JSON].include?(name)
         raise Error.new(22018, "Cannot convert JSON to #{name}")
       end
 
       case name
+      when 'BLOB', 'CLOB'
+        LobValues.convert(value,name,precision: precision,cast: cast,source_type: source_type)
       when "NULL"
         nil
       when "JSON"
@@ -206,13 +214,16 @@ module H2
 
     def coerce(value, source_type: nil, context: nil)
       return nil if value.nil?
+      if LobValues.value?(value) && !(LobValues::NAMES + %w[CHAR VARCHAR BINARY VARBINARY JSON]).include?(name)
+        return convert(value,source_type: source_type,context: context)
+      end
 
       case name
       when "JSON" then JsonValue.convert(value, source_type: source_type)
       when "DECFLOAT" then DecfloatValue.convert(value, source_type: source_type)
       when "CHAR"
         CharacterString.trim_spaces(with(precision: nil).convert(value, source_type: source_type, context: context))
-      when "VARCHAR", "BINARY", "VARBINARY"
+      when "VARCHAR", "BINARY", "VARBINARY", "BLOB", "CLOB"
         with(precision: nil).convert(value, source_type: source_type, context: context)
       when *Temporal::NAMES
         Temporal.convert(value, name, context: context)

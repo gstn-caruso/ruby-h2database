@@ -255,7 +255,7 @@ module H2
           node.type.convert(value, cast: true, source_type: type_of(node.expression), context: context)
         when JsonFormat
           value = evaluate(node.expression, row, group)
-          if value.is_a?(String) || value.nil?
+          if value.is_a?(String) || LobValues.value?(value) || value.nil?
             JsonFunctions.format(value, type_of(node.expression))
           else
             json_value(node.expression, value)
@@ -351,6 +351,12 @@ module H2
           type = Type.common([type_of(Literal.new(left)), type_of(Literal.new(right))])
           left, right = [left, right].map { type.coerce(it, context: context) }
           return compare(left, right)
+        end
+        if LobValues.value?(left) || LobValues.value?(right)
+          type = Type.check_comparable(type_of(Literal.new(left)),type_of(Literal.new(right)))
+          left, right = [left,right].map { type.coerce(it,context: context) }
+          return left.bytes <=> right.bytes if type.name == 'BLOB'
+          return CharacterString.sort_key(left.to_s) <=> CharacterString.sort_key(right.to_s)
         end
         if left.is_a?(EnumValue) || right.is_a?(EnumValue)
           type = left.is_a?(EnumValue) ? left.type : right.type
@@ -484,13 +490,17 @@ module H2
               "NUMERIC"
             end
             Type.new(name, nil, 0)
-          when BigDecimal then Type.new("NUMERIC", nil, [node.value.scale, 0].max)
+          when BigDecimal
+            _sign,digits,_base,exponent = node.value.split
+            Type.new('NUMERIC',[digits.length,exponent,1].max,[node.value.scale,0].max)
           when Float then Type.new("DOUBLE", nil, nil)
           when String
             binary = BinaryString.binary?(node.value)
             Type.new(binary ? "VARBINARY" : "VARCHAR", binary ? node.value.bytesize : CharacterString.sort_key(node.value).bytesize / 2, nil)
           when UUIDValue then Type.new("UUID", nil, nil)
           when JsonValue then Type.new("JSON", JsonValue::MAX_PRECISION, 0)
+          when BlobValue then Type.new('BLOB',node.value.precision,0)
+          when ClobValue then Type.new('CLOB',node.value.precision,0)
           when DecfloatValue then Type.new("DECFLOAT", node.value.precision, 0)
           when EnumValue then node.value.type
           when DateValue then Temporal.type("DATE")
@@ -520,7 +530,13 @@ module H2
               return type.with(precision: ArrayValue::MAX_CARDINALITY)
             end
             names = types.map(&:name)
-            return Type.new((names - %w[BINARY VARBINARY NULL]).empty? && (names & %w[BINARY VARBINARY]).any? ? "VARBINARY" : "VARCHAR", nil, nil)
+            binary = (names - %w[BINARY VARBINARY BLOB NULL]).empty? && (names & %w[BINARY VARBINARY BLOB]).any?
+            precision = nil
+            if constant?(node)
+              values = [evaluate(node.left),evaluate(node.right)]
+              precision = values.sum { binary ? BinaryString.encode(it).bytesize : CharacterString.sort_key(BinaryString.text(it)).bytesize / 2 } unless values.any?(&:nil?)
+            end
+            return Type.new(binary ? 'VARBINARY' : 'VARCHAR',precision,nil)
           end
 
           types = [type_of(node.left), type_of(node.right)]
@@ -1020,7 +1036,10 @@ module H2
         case node.name
         when "ARRAY_AGG" then ArrayType.new(argument_type, ArrayValue::MAX_CARDINALITY)
         when "COUNT", "LENGTH", "CHAR_LENGTH", "OCTET_LENGTH", "BIT_LENGTH" then Type.new("BIGINT", nil, 0)
-        when "UPPER", "UCASE", "LOWER", "LCASE" then Type.new("VARCHAR", nil, nil)
+        when "UPPER", "UCASE", "LOWER", "LCASE"
+          return type_of(Literal.new(evaluate(node))) if constant?(node) && !evaluate(node).nil?
+
+          Type.new('VARCHAR',[argument_type.precision || 1_000_000_000,1_000_000_000].min,nil)
         when "SIGN" then Type.new("INTEGER", nil, 0)
         when "ABS", "MIN", "MAX", "NULLIF" then argument_type
         when "COALESCE", "IFNULL" then Type.common(node.arguments.map { type_of(it) })
@@ -1162,7 +1181,7 @@ module H2
           end
         when "||"
           if type_of(node).name == "VARBINARY"
-            (left.b + right.b).freeze
+            (BinaryString.encode(left) + BinaryString.encode(right)).freeze
           else
             (BinaryString.text(left) + BinaryString.text(right)).freeze
           end
@@ -1295,6 +1314,8 @@ module H2
         when "UPPER", "UCASE" then BinaryString.text(first).upcase.freeze
         when "LOWER", "LCASE" then BinaryString.text(first).downcase.freeze
         when "LENGTH", "CHAR_LENGTH"
+          return first.bytes.bytesize if first.is_a?(BlobValue)
+
           text = BinaryString.text(first)
           if BinaryString.binary?(first)
             first.bytesize

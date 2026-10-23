@@ -50,6 +50,13 @@ class CLITest < Minitest::Test
     assert_equal "B\tU\nX'00ff'\t01234567-89ab-cdef-0123-456789abcdef\n(1 row)\n", output.string
   end
 
+  def test_lobs_keep_binary_output_and_escape_clob_text
+    output = StringIO.new
+    sql = "SELECT CAST(X'00ff' AS BLOB) AS b,CAST('a\nb' AS CLOB) AS c;"
+    assert_equal 0, H2::CLI.new.run(['--execute',sql],output: output)
+    assert_equal "B\tC\nX'00ff'\ta\\nb\n(1 row)\n", output.string
+  end
+
   def test_error_exits_nonzero
     output, error, status = Open3.capture3(RbConfig.ruby, "-Ilib", "exe/h2", "--execute", "TABLE missing;")
     refute status.success?

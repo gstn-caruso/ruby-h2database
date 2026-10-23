@@ -4,6 +4,7 @@ require_relative "../mvstore"
 require_relative "sql_writer"
 require_relative "metadata_parser"
 require_relative "value_adapter"
+require_relative "lob_references"
 
 module H2
   module Persistence
@@ -24,6 +25,7 @@ module H2
         @path = self.class.file_name(path)
         @store = MVStore::Store.open(@path, read_only: read_only, compression: compression)
         @transactions = MVStore::TransactionStore.new(@store, recover: false)
+        @lobs = LobReferences.new(@store)
         @records, @definitions = {}, {}
         if @store.has_map?("table.0")
           load_metadata
@@ -38,6 +40,7 @@ module H2
           load_metadata
         end
         @tables = load_tables
+        @lobs.cleanup
       rescue MVStore::Error => error
         abort
         raise sql_error(error)
@@ -76,7 +79,9 @@ module H2
             if table
               write_table(tx, table, definition)
             else
-              tx.open_map("table.#{definition.id}").clear
+              data = tx.open_map("table.#{definition.id}")
+              data.each { |_id,row| @lobs.track(row) }
+              data.clear
               definition.indexes.select(&:physical).each { tx.open_map("index.#{it.id}").clear }
             end
           end
@@ -84,12 +89,14 @@ module H2
         end
         @records, @definitions = records, definitions
         @tables = @tables.merge(planned).reject { |_name, table| table.nil? }.freeze
+        @lobs.cleanup
         planned
       rescue MVStore::Error => error
         raise sql_error(error)
       end
 
       def close
+        @lobs&.close
         @transactions&.close
         @store&.close
       rescue MVStore::Error => error
@@ -229,7 +236,7 @@ module H2
               unless row.is_a?(MVStore::SearchRow) && row.values.length == columns.length
                 raise Error.new(90030, "Stored table row has the wrong width")
               end
-              values = columns.each_with_index.to_h { |column, index| [column.name, ValueAdapter.decode(row.values[index], column.type, context: @context)] }
+              values = columns.each_with_index.to_h { |column, index| [column.name, ValueAdapter.decode(row.values[index], column.type, context: @context, lobs: @lobs)] }
               result = table.convert_row(values)
               table.rows << result
               table.assign_row_id(result, id)
@@ -292,8 +299,11 @@ module H2
 
       def write_table(tx, table, definition)
         data = tx.open_map("table.#{definition.id}", key_type: :long, value_type: row_type(table.columns.length))
+        existing = data.to_h
+        existing.each_value { @lobs.track(it) }
         rows = table.rows.map do |row|
-          values = table.columns.map { ValueAdapter.encode(row.fetch(it.name), it.type) }
+          previous = existing[table.row_id(row)]
+          values = table.columns.each_with_index.map { |column,index| ValueAdapter.encode(row.fetch(column.name), column.type, lobs: @lobs, table_id: definition.id, previous: previous&.values&.[](index)) }
           [table.row_id(row), MVStore::SearchRow.new(0, values)]
         end
         sync_map(data, rows)
