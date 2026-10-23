@@ -90,6 +90,8 @@ module H2
         when Predicate, Function then node.with(arguments: node.arguments.map { resolve_alias(it, aliases) })
         when Cast then node.with(expression: resolve_alias(node.expression, aliases))
         when TimeZoneExpression then node.with(expression: resolve_alias(node.expression, aliases), zone: node.zone && resolve_alias(node.zone, aliases))
+        when ArrayConstructor then node.with(expressions: node.expressions.map { resolve_alias(it, aliases) })
+        when ArrayElement then node.with(array: resolve_alias(node.array, aliases), index: resolve_alias(node.index, aliases))
         else node
         end
       end
@@ -257,7 +259,16 @@ module H2
       def expression(node, inside: false)
         case node
         when CurrentDateTime then node.name + (node.scale.nil? ? "" : "(#{node.scale})")
-        when TypedLiteral then expression(node.cast ? Cast.new(Literal.new(node.value), node.type) : Literal.new(node.value), inside: inside)
+        when DecimalLiteral then ArrayType.decimal_text(node.value, node.scale)
+        when TypedLiteral
+          if node.value.nil? && node.type.name == "BOOLEAN"
+            "UNKNOWN"
+          elsif node.value.is_a?(BigDecimal) && node.type.name == "NUMERIC"
+            text = ArrayType.decimal_text(node.value, node.type.scale)
+            node.cast ? "CAST(#{text} AS #{SQLTypeName.format(node.type)})" : text
+          else
+            expression(node.cast ? Cast.new(Literal.new(node.value), node.type) : Literal.new(node.value), inside: inside)
+          end
         when TimeZoneExpression then "#{expression(node.expression, inside: true)} AT #{node.zone ? "TIME ZONE #{expression(node.zone, inside: true)}" : 'LOCAL'}"
         when BoundColumn then node.binding.name
         when ColumnRef then inside && node.qualifier ? "#{node.qualifier}.#{node.name}" : node.name
@@ -271,6 +282,13 @@ module H2
           when IntervalValue then node.value.to_s
           when DateValue, TimeValue, TimestampValue, TimeTimeZoneValue, TimestampTimeZoneValue then "#{Temporal.name(node.value)} '#{node.value}'"
           when BigDecimal then node.value.to_s("F")
+          when ArrayValue
+            items = node.value.values.map do |value|
+              literal = value.is_a?(BigDecimal) ? TypedLiteral.new(value, node.value.element_type, false) : Literal.new(value)
+              expression(literal, inside: true)
+            end
+            "ARRAY [#{items.join(', ')}]"
+          when RowValue then "ROW (#{node.value.values.map { expression(Literal.new(it), inside: true) }.join(', ')})"
           else node.value.to_s
           end
         when Parameter then "?#{node.index + 1}"
@@ -288,20 +306,19 @@ module H2
         when Unary then "#{node.operator} #{expression(node.operand, inside: true)}"
         when Cast
           type = node.type
-          name = type.name == "VARBINARY" ? "BINARY VARYING" : type.name
-          name = Intervals.sql(type) if Intervals.name?(type.name)
-          name += "(#{type.precision})" if %w[BINARY VARBINARY].include?(type.name) && type.precision
-          if Temporal::NAMES.include?(type.name) && type.name != "DATE" && type.scale != (Temporal.time_type?(type.name) ? 0 : 6)
-            name = name.sub(/\A(TIMESTAMP|TIME)/) { "#{it}(#{type.scale})" }
-          end
-          if type.name == "NUMERIC" && type.precision && [type.precision, type.scale] != [100_000, 0]
-            name += "(#{type.precision}#{type.scale.to_i.zero? ? '' : ", #{type.scale}"})"
-          end
+          name = SQLTypeName.format(type)
           "CAST(#{expression(node.expression, inside: true)} AS #{name})"
         when RowConstructor then "ROW (#{node.expressions.map { expression(it, inside: true) }.join(', ')})"
+        when ArrayConstructor then "ARRAY [#{node.expressions.map { expression(it, inside: true) }.join(', ')}]"
+        when ArrayElement then "#{expression(node.array, inside: true)}[#{expression(node.index, inside: true)}]"
+        when ArrayQuery then "ARRAY (#{query(node.query)})"
         when Subquery then "(#{query(node.query)})"
         when Exists then "EXISTS(#{query(node.query)})"
-        when InQuery then "#{expression(node.expression, inside: true)} IN(#{query(node.query)})"
+        when InQuery
+          statement = node.query
+          statement = statement.with(distinct: true) if statement.is_a?(Select) && !statement.limit && !statement.offset
+          text = query(statement).lines.map { "    #{it}" }.join
+          "#{expression(node.expression, inside: true)} IN(#{text})"
         when CaseExpression
           sql = node.operand ? "CASE #{expression(node.operand, inside: true)}" : "CASE"
           node.branches.each { |condition, value| sql += " WHEN #{expression(condition, inside: true)} THEN #{expression(value, inside: true)}" }

@@ -95,6 +95,24 @@ end
 
 `UUID '...'` supplies a typed literal. UUID casts accept H2's textual UUID form or exactly 16 binary bytes. `H2::UUIDValue` is immutable, exposes `.bytes`, and formats canonical lowercase text with `.to_s`. Both types work in defaults, key constraints, comparisons, ordering, initial ROW values and persisted tables/indexes. Integer/binary casts retain signed big-endian widths. `LENGTH` / `CHAR_LENGTH`, `OCTET_LENGTH` and `BIT_LENGTH` distinguish character, binary, integer and UUID representations. Full type metadata, UUID generation functions and remaining binary functions still need migration. Empty binary columns inferred by native CTAS use precision 1 so their saved declarations can reopen; the Java snapshot's zero-precision metadata limitation is recorded in [MIGRATION.md](MIGRATION.md).
 
+## Arrays
+
+Declare an element type followed by `ARRAY` or `ARRAY[n]`; repeated suffixes declare nested arrays. Cardinality defaults to 65,536 and can be zero. SQL constructors use `ARRAY[...]` or `ARRAY(single_column_query)`. A query constructor preserves query ordering and returns a typed empty array when no rows match.
+
+```ruby
+H2.connect do |connection|
+  connection.execute("CREATE TABLE lists(id INT PRIMARY KEY, items INT ARRAY[3])")
+  connection.execute("INSERT INTO lists VALUES(?, ?)", 1, [10, nil, 30])
+  value = connection.execute("SELECT items FROM lists WHERE id=1").rows.first.first
+  p value.values # => [10, nil, 30]
+  p connection.execute("SELECT items[3], CARDINALITY(items) FROM lists").rows # => [[30, 3]]
+end
+```
+
+Ruby arrays, including nested arrays, become copied immutable `H2::ArrayValue` parameters. Results expose `.values`, `.element_type` and canonical `.to_s` output. SQL array types expose their element type, maximum cardinality in `.precision` and a component-aware `.name`. Elements use a common SQL type; decimal arrays retain their component scale. Assignment rejects an oversized array; a cast converts every element before truncating to the requested cardinality. Use explicit parameter casts such as `ARRAY[CAST(? AS INT)]` when H2 cannot infer a component type.
+
+Indexes start at 1; invalid indexes raise 22034. `||`, `ARRAY_CAT` and `ARRAY_APPEND` concatenate arrays or append/prepend scalars. `CARDINALITY` / `ARRAY_LENGTH`, `ARRAY_MAX_CARDINALITY`, `TRIM_ARRAY`, `ARRAY_CONTAINS`, `ARRAY_SLICE` and `ARRAY_GET` are available. Array equality and ordering retain H2's null semantics; `ARRAY_CONTAINS` uses null-safe element equality. Arrays work in keys, grouping, distinct/set queries, correlated query constructors and persisted defaults/rows/indexes. Array aggregation, `UNNEST`, quantified comparisons, compatibility modes and complete component metadata remain pending; [MIGRATION.md](MIGRATION.md) records the verified scope.
+
 ## Dates and times
 
 `DATE`, `TIME[(0..9)]` and `TIMESTAMP[(0..9)]` store calendar and wall-clock values without a time zone. Results use immutable `H2::DateValue`, `H2::TimeValue` and `H2::TimestampValue` objects, with canonical text from `.to_s`. Dates cover H2's Gregorian year range from -1,000,000,000 through 1,000,000,000. Times retain nanoseconds; column assignment and casts round to their declared scale, which defaults to 0 for TIME and 6 for TIMESTAMP.

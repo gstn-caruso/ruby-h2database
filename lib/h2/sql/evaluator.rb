@@ -8,7 +8,7 @@ module H2
         "UPPER" => 1..1, "UCASE" => 1..1, "LOWER" => 1..1, "LCASE" => 1..1, "LENGTH" => 1..1, "CHAR_LENGTH" => 1..1,
         "OCTET_LENGTH" => 1..1, "BIT_LENGTH" => 1..1,
         "ABS" => 1..1, "COALESCE" => 1..Float::INFINITY, "IFNULL" => 2..2, "NULLIF" => 2..2, "MOD" => 2..2,
-        "EXTRACT" => 2..2, "DATE_TRUNC" => 2..2, "LAST_DAY" => 1..1, "DATEADD" => 3..3, "DATEDIFF" => 3..3}.freeze
+        "EXTRACT" => 2..2, "DATE_TRUNC" => 2..2, "LAST_DAY" => 1..1, "DATEADD" => 3..3, "DATEDIFF" => 3..3}.merge(ArrayFunctions::ARITIES).freeze
 
       attr_reader :scope, :outer_bindings, :context
 
@@ -31,15 +31,16 @@ module H2
         when ColumnRef
           binding = scope.resolve(node)
           @outer_bindings << binding unless scope.local?(binding) || @outer_bindings.include?(binding)
-        when Literal, TypedLiteral, Parameter, BoundColumn, CurrentDateTime
+        when Literal, TypedLiteral, DecimalLiteral, Parameter, BoundColumn, CurrentDateTime
           nil
         when CaseExpression
           expression, _type = prepared_case(node)
           expressions = expression.is_a?(CaseExpression) ? case_children(expression) : [expression]
           expressions.each { validate(it, aggregates: aggregates, inside_aggregate: inside_aggregate) }
-        when Subquery, Exists, InQuery
+        when Subquery, Exists, InQuery, ArrayQuery
           validate(node.expression, aggregates: aggregates, inside_aggregate: inside_aggregate) if node.is_a?(InQuery)
           plan = subquery_plan(node)
+          raise Error.new(90052, "Array query must have one column") if node.is_a?(ArrayQuery) && plan.columns.length != 1
           Type.check_comparable(type_of(node.expression), query_type(plan)) if node.is_a?(InQuery)
           plan.outer_bindings.each do |binding|
             @outer_bindings << binding unless scope.local?(binding) || @outer_bindings.include?(binding)
@@ -62,21 +63,26 @@ module H2
             end
             validate(argument, aggregates: aggregates, inside_aggregate: inside_aggregate || aggregate)
           end
-          if %w[SUM AVG].include?(node.name) && (%w[BINARY VARBINARY UUID] + Temporal::NAMES).include?(type_of(node.arguments.first)&.name)
+          argument_type = type_of(node.arguments.first)
+          if %w[SUM AVG].include?(node.name) && (argument_type.is_a?(ArrayType) || (%w[BINARY VARBINARY UUID] + Temporal::NAMES).include?(argument_type&.name))
             raise Error.new(90015, "Invalid type for #{node.name}")
           end
           function_type(node) if datetime_function?(node)
+          function_type(node) if ArrayFunctions::ARITIES.key?(node.name)
         when Default, Star
           raise Error.new(42000, "Invalid expression #{node.class.name.split('::').last}")
         else
           children(node).each { validate(it, aggregates: aggregates, inside_aggregate: inside_aggregate) }
-          if node.is_a?(IntervalDifference) || node.is_a?(TimeZoneExpression)
+          if node.is_a?(IntervalDifference) || node.is_a?(TimeZoneExpression) || node.is_a?(ArrayElement) || node.is_a?(ArrayConstructor)
             type_of(node)
           elsif node.is_a?(Binary) && %w[= <> != < > <= >=].include?(node.operator)
             Type.check_comparable(type_of(node.left), type_of(node.right))
           elsif node.is_a?(Binary) && %w[+ - * / %].include?(node.operator)
             type = type_of(node)
-            if %w[BINARY VARBINARY UUID].include?(type.name)
+            if type.is_a?(ArrayType)
+              code = children(node).all? { constant?(it) } ? 50100 : 50000
+              raise Error.new(code, "Arithmetic on arrays is unavailable")
+            elsif %w[BINARY VARBINARY UUID].include?(type.name)
               raise Error.new(50100, "Arithmetic on #{type.name}")
             end
           elsif node.is_a?(Predicate) && [:in, :between, :distinct, :not_distinct].include?(node.operator)
@@ -93,7 +99,7 @@ module H2
       end
 
       def contains_subquery?(node)
-        return true if node.is_a?(Subquery) || node.is_a?(Exists) || node.is_a?(InQuery)
+        return true if node.is_a?(Subquery) || node.is_a?(Exists) || node.is_a?(InQuery) || node.is_a?(ArrayQuery)
 
         children(node).any? { contains_subquery?(it) }
       end
@@ -140,7 +146,7 @@ module H2
         return unless node
         return if groups.any? { canonical(it) == canonical(node) }
         return if node.is_a?(Function) && AGGREGATES.include?(node.name)
-        if node.is_a?(Subquery) || node.is_a?(Exists) || node.is_a?(InQuery)
+        if node.is_a?(Subquery) || node.is_a?(Exists) || node.is_a?(InQuery) || node.is_a?(ArrayQuery)
           subquery_plan(node).outer_bindings.each do |binding|
             @group_correlations << binding if scope.local?(binding) && !@group_correlations.include?(binding)
           end
@@ -178,6 +184,7 @@ module H2
         case node
         when Literal then node.value
         when TypedLiteral then node.value
+        when DecimalLiteral then node.value
         when CurrentDateTime
           raise Error.new(50100, "Current-clock function requires a SQL session context") unless context
 
@@ -207,6 +214,19 @@ module H2
         when Cast then node.type.convert(evaluate(node.expression, row, group), cast: true, source_type: type_of(node.expression), context: context)
         when Function then function(node, row, group)
         when RowConstructor then RowValue.new(node.expressions.map { evaluate(it, row, group) })
+        when ArrayConstructor
+          type_of(node).convert(ArrayValue.new(node.expressions.map { evaluate(it, row, group) }, type_of(node).element_type), cast: true, context: context)
+        when ArrayElement
+          array, index = [node.array, node.index].map { evaluate(it, row, group) }
+          return nil if array.nil? || index.nil?
+
+          index = Type.new("INTEGER", nil, nil).convert(index)
+          raise Error.new(22034, "Array index #{index} is outside 1..#{array.values.length}") unless (1..array.values.length).cover?(index)
+
+          array.values[index - 1]
+        when ArrayQuery
+          plan = subquery_plan(node)
+          ArrayType.new(plan.types.first, ArrayValue::MAX_CARDINALITY).convert(ArrayValue.new(plan.execute(row).rows.map(&:first), plan.types.first), cast: true, context: context)
         when Subquery
           plan = subquery_plan(node)
           plan.constant? ? constant_subquery(node, plan) : scalar_value(plan, row)
@@ -242,17 +262,31 @@ module H2
         Type.new("BOOLEAN", nil, nil).convert(value)
       end
 
-      def compare(left, right)
+      def compare(left, right, untyped: false)
         return 0 if left.nil? && right.nil?
         return -1 if left.nil?
         return 1 if right.nil?
         if left.is_a?(RowValue) || right.is_a?(RowValue)
           left, right = row_pair(left, right)
           left.values.zip(right.values).each do |a, b|
-            comparison = compare(a, b)
+            comparison = compare(a, b, untyped: untyped)
             return comparison unless comparison.zero?
           end
           return 0
+        end
+        if left.is_a?(ArrayValue) || right.is_a?(ArrayValue)
+          left = ArrayValue.new([left], type_of(Literal.new(left))) unless left.is_a?(ArrayValue)
+          right = ArrayValue.new([right], type_of(Literal.new(right))) unless right.is_a?(ArrayValue)
+          array_pairs(left, right).each do |a, b|
+            comparison = compare(a, b, untyped: untyped)
+            return comparison unless comparison.zero?
+          end
+          return left.values.length <=> right.values.length
+        end
+        if untyped
+          type = Type.common([type_of(Literal.new(left)), type_of(Literal.new(right))])
+          left, right = [left, right].map { type.coerce(it, context: context) }
+          return compare(left, right)
         end
         if left.is_a?(IntervalValue) || right.is_a?(IntervalValue)
           type = Type.check_comparable(type_of(Literal.new(left)), type_of(Literal.new(right)))
@@ -285,8 +319,25 @@ module H2
 
       def equals(left, right, null_safe: false)
         return null_safe ? left.nil? && right.nil? : nil if left.nil? || right.nil?
-        if left.is_a?(RowValue) || right.is_a?(RowValue)
-          left, right = row_pair(left, right)
+        if null_safe && [left, right].any? { it.is_a?(ArrayValue) || it.is_a?(RowValue) }
+          return compare(left, right, untyped: true).zero?
+        end
+        if left.is_a?(RowValue) || right.is_a?(RowValue) || left.is_a?(ArrayValue) || right.is_a?(ArrayValue)
+          if (left.is_a?(ArrayValue) || right.is_a?(ArrayValue)) && !left.is_a?(RowValue) && !right.is_a?(RowValue)
+            left = ArrayValue.new([left], type_of(Literal.new(left))) unless left.is_a?(ArrayValue)
+            right = ArrayValue.new([right], type_of(Literal.new(right))) unless right.is_a?(ArrayValue)
+            return false if left.values.length != right.values.length
+            unknown = false
+            array_pairs(left, right).each do |a, b|
+              result = equals(a, b, null_safe: null_safe)
+              return false if result == false
+
+              unknown = true if result.nil?
+            end
+            return unknown ? nil : true
+          else
+            left, right = row_pair(left, right)
+          end
           results = left.values.zip(right.values).map { |a, b| equals(a, b, null_safe: null_safe) }
           return false if results.include?(false)
           return nil if results.include?(nil)
@@ -299,6 +350,7 @@ module H2
       def type_of(node)
         case node
         when TypedLiteral then node.type
+        when DecimalLiteral then Type.new("NUMERIC", node.precision, node.scale)
         when CurrentDateTime
           name = {"CURRENT_DATE" => "DATE", "LOCALTIME" => "TIME", "LOCALTIMESTAMP" => "TIMESTAMP",
             "CURRENT_TIME" => "TIME WITH TIME ZONE", "CURRENT_TIMESTAMP" => "TIMESTAMP WITH TIME ZONE"}.fetch(node.name)
@@ -313,6 +365,24 @@ module H2
           end
           IntervalOperations.type("-", type_of(node.left), type_of(node.right))
         when RowConstructor then RowType.new(node.expressions.map { type_of(it) })
+        when ArrayConstructor
+          types = node.expressions.map { type_of(it) }
+          if types.any? { it.name == "UNKNOWN" } && types.all? { %w[NULL UNKNOWN].include?(it.name) }
+            raise Error.new(50004, "Array component type is unknown")
+          end
+          ArrayType.new(ArrayType.element_common(types), node.expressions.length)
+        when ArrayElement
+          type = type_of(node.array)
+          return type if type.name == "NULL"
+          raise Error.new(50004, "Array input type is unknown") if type.name == "UNKNOWN"
+          raise Error.new(90008, "Array access requires an array") unless type.is_a?(ArrayType)
+
+          type.element_type
+        when ArrayQuery
+          plan = subquery_plan(node)
+          raise Error.new(90052, "Array query must have one column") unless plan.columns.length == 1
+
+          ArrayType.new(plan.types.first, ArrayValue::MAX_CARDINALITY)
         when Subquery
           plan = subquery_plan(node)
           plan.constant? && constant_subquery(node, plan).nil? ? Type.new("NULL", nil, nil) : query_type(plan)
@@ -344,6 +414,7 @@ module H2
           when true, false then Type.new("BOOLEAN", nil, nil)
           when nil then Type.new("NULL", nil, nil)
           when RowValue then RowType.new(node.value.values.map { type_of(Literal.new(it)) })
+          when ArrayValue then ArrayType.new(node.value.element_type, node.value.values.length)
           end
         when Unary then node.operator == "NOT" ? Type.new("BOOLEAN", nil, nil) : type_of(node.operand)
         when Predicate then Type.new("BOOLEAN", nil, nil)
@@ -351,11 +422,18 @@ module H2
         when Binary
           return Type.new("BOOLEAN", nil, nil) if %w[AND OR = <> != < > <= >=].include?(node.operator)
           if node.operator == "||"
-            names = [type_of(node.left)&.name, type_of(node.right)&.name]
+            types = [type_of(node.left), type_of(node.right)]
+            if types.any? { it.is_a?(ArrayType) }
+              types = types.map { it.is_a?(ArrayType) ? it : ArrayType.new(it, 1) }
+              type = Type.common(types)
+              return type.with(precision: ArrayValue::MAX_CARDINALITY)
+            end
+            names = types.map(&:name)
             return Type.new((names - %w[BINARY VARBINARY NULL]).empty? && (names & %w[BINARY VARBINARY]).any? ? "VARBINARY" : "VARCHAR", nil, nil)
           end
 
           types = [type_of(node.left), type_of(node.right)]
+          return Type.common(types) if types.any? { it.is_a?(ArrayType) }
           return IntervalOperations.type(node.operator, *types) if IntervalOperations.applicable?(node.operator, *types)
           return TemporalOperations.type(node.operator, *types) if types.any? { Temporal::NAMES.include?(it&.name) }
 
@@ -374,7 +452,8 @@ module H2
         when Predicate, Function then node.arguments
         when Cast then [node.expression]
         when TimeZoneExpression then [node.expression, node.zone].compact
-        when RowConstructor then node.expressions
+        when RowConstructor, ArrayConstructor then node.expressions
+        when ArrayElement then [node.array, node.index]
         when CaseExpression
           expression = prepared_case(node).first
           expression.is_a?(CaseExpression) ? case_children(expression) : [expression]
@@ -387,6 +466,10 @@ module H2
       end
 
       def optimized_expression(node)
+        if (node.is_a?(ArrayConstructor) || node.is_a?(ArrayElement)) && constant?(node)
+          value = evaluate(node)
+          return value.nil? ? TypedLiteral.new(value, type_of(node), type_of(node).name != "NULL") : Literal.new(value)
+        end
         if node.is_a?(TimeZoneExpression) && constant?(node)
           value = evaluate(node)
           return value.nil? ? node : Literal.new(value)
@@ -417,6 +500,9 @@ module H2
         if target.is_a?(RowType)
           fields = source.is_a?(RowType) ? source.fields : [source]
           return target.fields.zip(fields).any? { session_date_conversion?(*it) }
+        end
+        if target.is_a?(ArrayType)
+          return session_date_conversion?(target.element_type, source.is_a?(ArrayType) ? source.element_type : source)
         end
         return false unless Temporal::NAMES.include?(target.name)
         return true if target.name != "DATE" && %w[CHAR VARCHAR].include?(source.name)
@@ -515,10 +601,10 @@ module H2
         return false if session_dependent?(node)
 
         case node
-        when Literal, TypedLiteral then true
+        when Literal, TypedLiteral, DecimalLiteral then true
         when TimeZoneExpression then !node.zone.nil? && children(node).all? { constant?(it) }
         when Subquery then subquery_plan(node).constant?
-        when Unary, Binary, IntervalDifference, Predicate, Cast, RowConstructor then children(node).all? { constant?(it) }
+        when Unary, Binary, IntervalDifference, Predicate, Cast, RowConstructor, ArrayConstructor, ArrayElement then children(node).all? { constant?(it) }
         when Function then FUNCTIONS.key?(node.name) && !AGGREGATES.include?(node.name) && children(node).all? { constant?(it) }
         when CaseExpression
           expression = prepared_case(node).first
@@ -528,7 +614,7 @@ module H2
       end
 
       def contains_null?(value)
-        value.nil? || (value.is_a?(RowValue) && value.values.any? { contains_null?(it) })
+        value.nil? || ([RowValue, ArrayValue].any? { value.is_a?(it) } && value.values.any? { contains_null?(it) })
       end
 
       def subquery_plan(node)
@@ -552,6 +638,13 @@ module H2
 
       def nullable_compare(left, right)
         return nil if left.nil? || right.nil?
+        if left.is_a?(ArrayValue) && right.is_a?(ArrayValue)
+          array_pairs(left, right).each do |a, b|
+            result = nullable_compare(a, b)
+            return result if result.nil? || !result.zero?
+          end
+          return left.values.length <=> right.values.length
+        end
         if left.is_a?(RowValue) || right.is_a?(RowValue)
           left, right = row_pair(left, right)
           left.values.zip(right.values).each do |a, b|
@@ -582,7 +675,8 @@ module H2
         when Predicate, Function then node.with(arguments: node.arguments.map { canonical(it) })
         when Cast then node.with(expression: canonical(node.expression))
         when TimeZoneExpression then node.with(expression: canonical(node.expression), zone: node.zone && canonical(node.zone))
-        when RowConstructor then node.with(expressions: node.expressions.map { canonical(it) })
+        when RowConstructor, ArrayConstructor then node.with(expressions: node.expressions.map { canonical(it) })
+        when ArrayElement then node.with(array: canonical(node.array), index: canonical(node.index))
         when CaseExpression
           node.with(operand: node.operand && canonical(node.operand),
             branches: node.branches.map { |condition, value| [canonical(condition), canonical(value)] }, fallback: canonical(node.fallback))
@@ -591,6 +685,13 @@ module H2
       end
 
       def function_type(node)
+        if ArrayFunctions::ARITIES.key?(node.name)
+          type = ArrayFunctions.type(node.name, type_of(node.arguments.first))
+          if constant?(node) && (value = evaluate(node))
+            return type_of(Literal.new(value))
+          end
+          return type
+        end
         if CalendarFunctions::NAMES.include?(node.name)
           field = node.name == "LAST_DAY" ? nil : node.arguments.first.value
           type = CalendarFunctions.type(node.name, field, type_of(node.arguments.last))
@@ -642,6 +743,24 @@ module H2
         raise Error.new(22018, "Cannot convert #{value.inspect} to number")
       end
 
+      def character_pair(left, right, left_type, right_type)
+        if [left_type, right_type].any? { it&.name == "CHAR" } &&
+            [left, right].all? { it.is_a?(String) && !BinaryString.binary?(it) }
+          return [left, right].map { CharacterString.trim_spaces(it) }
+        end
+        [left, right]
+      end
+
+      def array_pairs(left, right)
+        count = [left.values.length, right.values.length].min
+        left.values.first(count).zip(right.values).map { |a, b| character_pair(a, b, left.element_type, right.element_type) }
+      end
+
+      def value_equals(left, right, left_type: nil, right_type: nil)
+        left, right = character_pair(left, right, left_type, right_type)
+        compare(left, right, untyped: true).zero?
+      end
+
       def check_integer(value, node)
         type = type_of(node)
         return value unless value.is_a?(Integer) && type && Type::INTEGER_LIMITS.key?(type.name)
@@ -651,6 +770,15 @@ module H2
 
       def binary(node, row, group)
         left = evaluate(node.left, row, group)
+        if node.operator == "||" && (type = type_of(node)).is_a?(ArrayType)
+          left = type.coerce(left, context: context)
+          return nil if left.nil?
+
+          right = type.coerce(evaluate(node.right, row, group), context: context)
+          return nil if right.nil?
+
+          return ArrayValue.new(left.values + right.values, type.element_type)
+        end
         right = evaluate(node.right, row, group)
         if node.operator == "AND"
           left, right = boolean(left), boolean(right)
@@ -775,6 +903,11 @@ module H2
 
       def function(node, row, group)
         return aggregate(node, group) if AGGREGATES.include?(node.name)
+        if ArrayFunctions::ARITIES.key?(node.name)
+          return ArrayFunctions.evaluate(node.name, type_of(node.arguments.first),
+            ->(index) { evaluate(node.arguments[index], row, group) },
+            ->(a, b, element) { value_equals(a, b, left_type: element, right_type: type_of(node.arguments[1])) })
+        end
 
         if %w[COALESCE IFNULL].include?(node.name)
           node.arguments.each do |argument|

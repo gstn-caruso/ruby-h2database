@@ -81,7 +81,7 @@ module H2
         IndexDefinition.new(name, table, columns.freeze, sorts.freeze, unique, primary)
       end
 
-      def parse_type
+      def base_type
         if accept("ROW")
           expect("(")
           fields = list { identifier; parse_type }

@@ -11,7 +11,7 @@ abort "Build the Java reference first" unless File.file?(jar)
 java = ENV["JAVA_HOME"] ? File.join(ENV.fetch("JAVA_HOME"), "bin/java") : "java"
 oracle = [java, "-cp", jar, File.join(__dir__, "JdbcOracle.java")]
 decode = ->(value) { value.unpack1("m0").force_encoding(Encoding::UTF_8) }
-type_name = ->(name) { name.start_with?("ROW(") ? "ROW" : {"CHARACTER VARYING" => "VARCHAR", "CHARACTER" => "CHAR", "DOUBLE PRECISION" => "DOUBLE", "BINARY VARYING" => "VARBINARY"}.fetch(name, name) }
+type_name = ->(name) { name.start_with?("ROW(") && !name.end_with?(" ARRAY") ? "ROW" : {"CHARACTER VARYING" => "VARCHAR", "CHARACTER" => "CHAR", "DOUBLE PRECISION" => "DOUBLE", "BINARY VARYING" => "VARBINARY"}.fetch(name, name) }
 normalize = lambda do |value, type|
   next nil if value.nil?
 
@@ -52,7 +52,7 @@ ruby_run = lambda do |path, statements, **options|
       begin
         result = connection.execute(sql)
         if result.query?
-          types = result.types.map(&:name)
+          types = result.types.map { type_name.call(it.name) }
           {columns: result.columns, types: types, rows: result.rows.map { |row| row.each_with_index.map { |value, index| normalize.call(value, types[index]) } }}
         else
           {update: result.update_count}
@@ -162,6 +162,19 @@ changes = ["UPDATE people SET amount=amount+1 WHERE id=-7", "INSERT INTO people(
   "UPDATE zoned_values SET t=t AT TIME ZONE 'UTC' WHERE id=2",
   "UPDATE zoned_values SET ts=ts AT TIME ZONE '-05' WHERE id=3",
   "INSERT INTO zoned_clock DEFAULT VALUES"]
+
+schema.concat([
+  "CREATE TABLE arrays(a INT ARRAY PRIMARY KEY,n TIMESTAMP(9) WITH TIME ZONE ARRAY[3] ARRAY[2],b VARBINARY(4) ARRAY,d NUMERIC(8,3) ARRAY,u UUID ARRAY)",
+  "INSERT INTO arrays VALUES(ARRAY[],ARRAY[ARRAY[TIMESTAMP WITH TIME ZONE '2000-01-01 12:34:56.123456789+03']],ARRAY[X'00',NULL,X'ff'],ARRAY[1.250,NULL,2.500],ARRAY[UUID '01234567-89ab-cdef-0123-456789abcdef']),(ARRAY[1],NULL,NULL,NULL,NULL),(ARRAY[1,2],NULL,NULL,NULL,NULL),(ARRAY[1,2,3],NULL,NULL,NULL,NULL),(ARRAY[2],NULL,NULL,NULL,NULL),(ARRAY[NULL],NULL,NULL,NULL,NULL)",
+  "CREATE TABLE array_defaults(a INT ARRAY DEFAULT ARRAY(SELECT v FROM source ORDER BY v),n NUMERIC(5,3) ARRAY DEFAULT ARRAY[1.250,2.500],b VARBINARY ARRAY DEFAULT ARRAY[CAST(1 AS SMALLINT)],d NUMERIC(12,2) ARRAY DEFAULT TRIM_ARRAY(ARRAY[CAST((SELECT v FROM source) AS INT),2.00],1))",
+  "INSERT INTO array_defaults DEFAULT VALUES",
+  "CREATE TABLE array_rows AS SELECT ARRAY[ROW(1,'x'),ROW(2,'abc')] AS a",
+  "CREATE TABLE empty_arrays AS SELECT ARRAY(SELECT v FROM source WHERE FALSE) AS a"
+])
+queries.concat(["TABLE arrays ORDER BY a", "TABLE array_defaults ORDER BY a", "TABLE array_rows", "TABLE empty_arrays",
+  "SELECT a,CARDINALITY(a) AS c,ARRAY_MAX_CARDINALITY(a) AS m FROM arrays ORDER BY a"])
+changes.concat(["UPDATE arrays SET b=ARRAY[X'ffff'],d=d||3.750 WHERE a=ARRAY[]", "INSERT INTO arrays(a) VALUES(ARRAY[1,2])",
+  "DELETE FROM arrays WHERE a=ARRAY[1,2,3]", "INSERT INTO array_defaults DEFAULT VALUES", "INSERT INTO empty_arrays VALUES(ARRAY[1,2])"])
 
 intervals = [
   ["YEAR", "1"], ["MONTH", "2"], ["DAY", "3"], ["HOUR", "4"], ["MINUTE", "5"], ["SECOND", "6.123456789"],

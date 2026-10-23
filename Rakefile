@@ -19,6 +19,7 @@ namespace :test do
     ruby "test/reference/intervals.rb"
     ruby "test/reference/session_context.rb"
     ruby "test/reference/zoned_temporal.rb"
+    ruby "test/reference/arrays.rb"
     ruby "test/reference/mvstore.rb"
     ruby "test/reference/sql_storage.rb"
     ruby "test/reference/transactions.rb"

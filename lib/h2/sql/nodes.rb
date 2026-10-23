@@ -5,6 +5,7 @@ module H2
     UNBOUND_PARAMETER = Object.new.freeze
     Literal = Data.define(:value)
     TypedLiteral = Data.define(:value, :type, :cast)
+    DecimalLiteral = Data.define(:value, :precision, :scale)
     CurrentDateTime = Data.define(:name, :scale)
     TimeZoneExpression = Data.define(:expression, :zone)
     Parameter = Data.define(:index)
@@ -20,6 +21,9 @@ module H2
     Function = Data.define(:name, :arguments, :distinct)
     Cast = Data.define(:expression, :type)
     RowConstructor = Data.define(:expressions)
+    ArrayConstructor = Data.define(:expressions)
+    ArrayElement = Data.define(:array, :index)
+    ArrayQuery = Data.define(:query)
     Subquery = Data.define(:query)
     Exists = Data.define(:query)
     InQuery = Data.define(:expression, :query)

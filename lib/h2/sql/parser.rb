@@ -225,8 +225,26 @@ module H2
       end
 
       def parse_type
+        array_type(base_type)
+      end
+
+      def array_type(type)
+        while accept("ARRAY")
+          precision = ArrayValue::MAX_CARDINALITY
+          if accept("[")
+            precision = positive_integer(allow_zero: true)
+            expect("]")
+            raise Error.new(90150, "Invalid array cardinality") if precision > ArrayValue::MAX_CARDINALITY
+          end
+          type = ArrayType.new(type, precision)
+        end
+        type
+      end
+
+      def base_type
         name = take.value
         name = TYPE_NAMES.fetch(name, name)
+        raise Error.new(42001, "Expected array element type") if name == "ARRAY"
         return interval_type.first if name == "INTERVAL"
         return temporal_type(name) if Temporal::NAMES.include?(name)
         if name == "CHAR" && accept("VARYING")
@@ -463,9 +481,13 @@ module H2
       def select
         distinct = accept("DISTINCT")
         accept("ALL") unless distinct
-        projections = list do
-          node = expression
-          Projection.new(node, optional_alias)
+        projections = if current.kind == :eof || %w[) ; FROM WHERE GROUP HAVING ORDER LIMIT OFFSET FETCH UNION INTERSECT EXCEPT].any? { keyword?(it) }
+          []
+        else
+          list do
+            node = expression
+            Projection.new(node, optional_alias)
+          end
         end
         source = from_clause if accept("FROM")
         where = expression if accept("WHERE")
@@ -664,6 +686,9 @@ module H2
             left = negate ? Unary.new("NOT", node) : node
           elsif accept("::")
             left = Cast.new(left, parse_type)
+          elsif accept("[")
+            left = ArrayElement.new(left, expression)
+            expect("]")
           elsif keyword?("AT") && (@tokens[@position + 1]&.value == "LOCAL" ||
               (@tokens[@position + 1]&.value == "TIME" && @tokens[@position + 2]&.value == "ZONE"))
             take
@@ -698,6 +723,9 @@ module H2
 
       def prefix
         token = take
+        if token.kind == :literal && token.value.is_a?(DecimalLiteral)
+          return token.value
+        end
         return Literal.new(token.value) if token.kind == :literal
         return column_or_function(token) if token.kind == :identifier
 
@@ -789,6 +817,17 @@ module H2
           expressions = keyword?(")") ? [] : list { expression }
           expect(")")
           RowConstructor.new(expressions)
+        when "ARRAY"
+          if accept("[")
+            expressions = keyword?("]") ? [] : list { expression }
+            expect("]")
+            ArrayConstructor.new(expressions)
+          else
+            expect("(")
+            node = ArrayQuery.new(query)
+            expect(")")
+            node
+          end
         when "("
           if query_start?
             node = Subquery.new(query)
@@ -852,10 +891,15 @@ module H2
       def column_or_function(token)
         name = token.value
         if accept("(")
+          name = "CARDINALITY" if name == "ARRAY_LENGTH"
           distinct = accept("DISTINCT")
           arguments = keyword?(")") ? [] : list { expression }
           expect(")")
-          if (field = CalendarFunctions::FIELD_FUNCTIONS[name])
+          if %w[ARRAY_GET ARRAY_APPEND ARRAY_CAT].include?(name)
+            raise Error.new(7001, "#{name} requires two arguments") unless arguments.length == 2
+
+            name == "ARRAY_GET" ? ArrayElement.new(*arguments) : Binary.new("||", *arguments)
+          elsif (field = CalendarFunctions::FIELD_FUNCTIONS[name])
             Function.new("EXTRACT", [Literal.new(field), *arguments], distinct)
           else
             Function.new(name, arguments, distinct)

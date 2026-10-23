@@ -31,6 +31,9 @@ module H2
       end
 
       def type(value)
+        if value.is_a?(ArrayType)
+          return "#{type(value.element_type)} ARRAY#{value.precision == ArrayValue::MAX_CARDINALITY ? '' : "[#{value.precision}]"}"
+        end
         return Intervals.sql(value, explicit: true) if Intervals.name?(value.name)
         if value.is_a?(RowType)
           return "ROW(#{value.fields.each_with_index.map { |field, index| "#{identifier("C#{index + 1}")} #{type(field)}" }.join(', ')})"
@@ -44,7 +47,7 @@ module H2
         end
       end
 
-      def literal(value)
+      def literal(value, type: nil)
         case value
         when nil then "NULL"
         when true then "TRUE"
@@ -58,13 +61,16 @@ module H2
         when UUIDValue then "UUID '#{value}'"
         when IntervalValue then value.to_s
         when DateValue, TimeValue, TimestampValue, TimeTimeZoneValue, TimestampTimeZoneValue then "#{Temporal.name(value)} '#{value}'"
-        when BigDecimal then value.to_s("F")
+        when BigDecimal then type&.name == "NUMERIC" ? ArrayType.decimal_text(value, type.scale) : value.to_s("F")
         when Integer then value.to_s
         when Float
           raise Error.new(50100, "Non-finite default SQL has not been ported") unless value.finite?
 
           "CAST(#{value.to_s} AS DOUBLE PRECISION)"
         when RowValue then "ROW(#{value.values.map { literal(it) }.join(', ')})"
+        when ArrayValue
+          text = "ARRAY[#{value.values.map { literal(it, type: value.element_type) }.join(', ')}]"
+          value.element_type.name == "NULL" ? text : "CAST(#{text} AS #{self.type(ArrayType.new(value.element_type, value.values.length))})"
         else raise Error.new(50100, "Default SQL value has not been ported")
         end
       end
@@ -72,7 +78,14 @@ module H2
       def expression(node, parameters: [], ctes: [])
         render = ->(child) { expression(child, parameters: parameters, ctes: ctes) }
         case node
-        when SQL::TypedLiteral then expression(node.cast ? SQL::Cast.new(SQL::Literal.new(node.value), node.type) : SQL::Literal.new(node.value), parameters: parameters, ctes: ctes)
+        when SQL::DecimalLiteral then ArrayType.decimal_text(node.value, node.scale)
+        when SQL::TypedLiteral
+          if node.value.is_a?(BigDecimal) && node.type.name == "NUMERIC"
+            text = ArrayType.decimal_text(node.value, node.type.scale)
+            node.cast ? "CAST(#{text} AS #{type(node.type)})" : text
+          else
+            expression(node.cast ? SQL::Cast.new(SQL::Literal.new(node.value), node.type) : SQL::Literal.new(node.value), parameters: parameters, ctes: ctes)
+          end
         when SQL::CurrentDateTime then node.name + (node.scale.nil? ? "" : "(#{node.scale})")
         when SQL::TimeZoneExpression then "(#{render.call(node.expression)} AT #{node.zone ? "TIME ZONE #{render.call(node.zone)}" : 'LOCAL'})"
         when SQL::CapturedExpression then expression(node.expression, parameters: node.parameters, ctes: ctes)
@@ -93,6 +106,9 @@ module H2
             "#{node.name}(#{node.distinct ? 'DISTINCT ' : ''}#{node.arguments.map { render.call(it) }.join(', ')})"
           end
         when SQL::RowConstructor then "ROW(#{node.expressions.map { render.call(it) }.join(', ')})"
+        when SQL::ArrayConstructor then "ARRAY[#{node.expressions.map { render.call(it) }.join(', ')}]"
+        when SQL::ArrayElement then "(#{render.call(node.array)})[#{render.call(node.index)}]"
+        when SQL::ArrayQuery then "ARRAY(#{query(node.query, parameters: parameters, ctes: ctes)})"
         when SQL::Subquery then "(#{query(node.query, parameters: parameters, ctes: ctes)})"
         when SQL::Exists then "EXISTS(#{query(node.query, parameters: parameters, ctes: ctes)})"
         when SQL::InQuery then "(#{render.call(node.expression)} IN(#{query(node.query, parameters: parameters, ctes: ctes)}))"

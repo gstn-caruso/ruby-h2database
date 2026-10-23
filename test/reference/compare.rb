@@ -21,6 +21,7 @@ reference = output.split("END\n").map { it.lines.map(&:chomp) }
 abort "Java reference returned #{reference.length} results for #{statements.length} statements" unless reference.length == statements.length
 
 type_names = {"CHARACTER VARYING" => "VARCHAR", "CHARACTER" => "CHAR", "DOUBLE PRECISION" => "DOUBLE", "BINARY VARYING" => "VARBINARY"}
+normalize_type = ->(type) { type.start_with?("ROW(") && !type.end_with?(" ARRAY") ? "ROW" : type_names.reduce(type) { |name, (from, to)| name.gsub(/\b#{Regexp.escape(from)}(?=\(| ARRAY|\z)/, to) } }
 normalize = lambda do |value, type|
   next nil if value.nil?
 
@@ -46,7 +47,7 @@ H2.connect do |connection|
       columns = parts.drop(1).map { decode.call(it) }
       types = lines[1].split("\t").drop(1).map do |encoded|
         type = decode.call(encoded)
-        type.start_with?("ROW(") ? "ROW" : type_names.fetch(type, type)
+        normalize_type.call(type)
       end
       rows = lines.drop(2).map do |line|
         line.split("\t").drop(1).each_with_index.map do |value, column|
@@ -61,7 +62,7 @@ H2.connect do |connection|
     actual = begin
       result = connection.execute(sql)
       if result.query?
-        types = result.types.map(&:name)
+        types = result.types.map { normalize_type.call(it.name) }
         rows = result.rows.map { |row| row.each_with_index.map { |value, column| normalize.call(value, types[column]) } }
         rows = rows.sort_by { JSON.generate(it) } unless sql.match?(/\bORDER\s+BY\b/i)
         {columns: result.columns, types: types, rows: rows}

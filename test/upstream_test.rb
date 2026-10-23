@@ -7,7 +7,8 @@ class UpstreamTest < DatabaseTest
   ROOT = File.expand_path("../h2/src/test/org/h2/test/scripts", __dir__)
   COMPLETE_SCRIPTS = %w[datatypes/int.sql datatypes/uuid.sql functions/string/upper.sql functions/string/lower.sql
     functions/system/coalesce.sql functions/numeric/mod.sql functions/system/nullif.sql
-    functions/timeanddate/dateadd.sql functions/timeanddate/datediff.sql].freeze
+    functions/timeanddate/dateadd.sql functions/timeanddate/datediff.sql functions/timeanddate/last_day.sql
+    functions/system/array-cat.sql functions/system/trim_array.sql].freeze
 
   COMPLETE_SCRIPTS.each do |path|
     define_method("test_complete_#{path.tr('/.', '__')}") do
@@ -113,6 +114,26 @@ class UpstreamTest < DatabaseTest
   def test_original_interval_values_casts_and_initial_arithmetic
     script = UpstreamScript.new(File.join(ROOT, "datatypes/interval.sql"))
     [0, 2, *(4..180), *(187..190), *(195..215), *(217..240), 245, 246, *(248..317)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_arrays_except_metadata_memory_tables_scripts_indexes_and_reconnect
+    script = UpstreamScript.new(File.join(ROOT, "datatypes/array.sql"))
+    [*(0..37), *(39..42), 56, 57, 58, *(61..68), *(71..78)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_array_contains_before_identity_columns
+    script = UpstreamScript.new(File.join(ROOT, "functions/system/array-contains.sql"))
+    script.cases.first(9).each { check_case(it) }
+  end
+
+  def test_original_array_slice_in_regular_mode
+    script = UpstreamScript.new(File.join(ROOT, "functions/system/array-slice.sql"))
+    [*(0..4), *(10..12)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_cardinality_except_json_and_array_aggregation
+    script = UpstreamScript.new(File.join(ROOT, "functions/system/cardinality.sql"))
+    [0, 1, 2, *(5..7), *(9..12)].each { check_case(script.cases.fetch(it)) }
   end
 
   private

@@ -7,6 +7,9 @@ module H2
 
       def encode(value, type)
         return MVStore::Value.new(:null, nil) if value.nil?
+        if type.is_a?(ArrayType)
+          return MVStore::Value.new(:array, value.values.map { encode(it, type.element_type) })
+        end
         if type.is_a?(RowType)
           return MVStore::Value.new(:row, type.fields.each_with_index.map { |field, index| encode(value.values[index], field) })
         end
@@ -37,6 +40,11 @@ module H2
 
       def decode(value, type)
         return nil if value.type == :null
+        if type.is_a?(ArrayType)
+          raise Error.new(90030, "Stored value is not an array") unless value.type == :array
+
+          return type.convert(ArrayValue.new(value.data.map { decode(it, type.element_type) }, type.element_type))
+        end
         if type.is_a?(RowType)
           unless value.type == :row && value.data.length == type.fields.length
             raise Error.new(90030, "Stored row does not match its column type")

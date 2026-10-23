@@ -210,7 +210,7 @@ module H2
 
     def comparison_key(value)
       return [name(value), value.epoch_nanos] if zoned?(value)
-      return value.values.map { comparison_key(it) } if value.is_a?(RowValue)
+      return value.values.map { comparison_key(it) } if value.is_a?(RowValue) || value.is_a?(ArrayValue)
 
       value
     end

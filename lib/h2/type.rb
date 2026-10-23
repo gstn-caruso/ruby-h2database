@@ -8,6 +8,17 @@ module H2
       "BIGINT" => (-9_223_372_036_854_775_808..9_223_372_036_854_775_807)}.freeze
 
     def self.check_comparable(left, right)
+      a, b = left, right
+      a = a.fields.first while a.is_a?(RowType) && a.fields.length == 1
+      b = b.fields.first while b.is_a?(RowType) && b.fields.length == 1
+      if a.is_a?(ArrayType) || b.is_a?(ArrayType)
+        if a.is_a?(ArrayType) && b.is_a?(ArrayType)
+          check_comparable(a.element_type, b.element_type)
+        elsif ![a, b].any? { it && %w[NULL UNKNOWN].include?(it.name) }
+          raise Error.new(90110, "SQL array types are not comparable")
+        end
+        return common([left, right])
+      end
       if left.is_a?(RowType) && right.is_a?(RowType) && left.fields.length == right.fields.length
         left.fields.zip(right.fields).each { check_comparable(*it) }
       elsif left && right && !left.is_a?(RowType) && !right.is_a?(RowType)
@@ -51,6 +62,7 @@ module H2
 
         return RowType.new(Array.new(types.first.fields.length) { |index| common(types.map { it.fields[index] }) })
       end
+      return types.reduce { ArrayType.common(_1, _2) } if types.any? { it.is_a?(ArrayType) }
       return Intervals.common(types) if types.any? { Intervals.name?(it.name) }
 
       name = types.max_by { ORDER.index(it.name) || -1 }.name
