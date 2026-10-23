@@ -37,7 +37,7 @@ module H2
         end
         return Intervals.sql(value, explicit: true) if Intervals.name?(value.name)
         if value.is_a?(RowType)
-          return "ROW(#{value.fields.each_with_index.map { |field, index| "#{identifier("C#{index + 1}")} #{type(field)}" }.join(', ')})"
+          return "ROW(#{value.fields.each_with_index.map { |field, index| "#{identifier(value.names[index])} #{type(field)}" }.join(', ')})"
         end
         case value.name
         when *(Temporal::NAMES - ["DATE"])
@@ -70,7 +70,14 @@ module H2
         when Float
           text = value.finite? ? value.to_s : "'#{value}'"
           "CAST(#{text} AS DOUBLE PRECISION)"
-        when RowValue then "ROW(#{value.values.map { literal(it) }.join(', ')})"
+        when RowValue
+          fields = value.values.each_with_index.map do |item,index|
+            field = value.type&.fields&.fetch(index)
+            text = literal(item, type: field)
+            field && field.name != "NULL" && !(field.is_a?(RowType) && field.fields.empty?) ? "CAST(#{text} AS #{self.type(field)})" : text
+          end
+          row = "ROW(#{fields.join(', ')})"
+          value.type && !value.values.empty? ? "CAST(#{row} AS #{self.type(value.type)})" : row
         when ArrayValue
           text = "ARRAY[#{value.values.map { literal(it, type: value.element_type) }.join(', ')}]"
           value.element_type.name == "NULL" ? text : "CAST(#{text} AS #{self.type(ArrayType.new(value.element_type, value.values.length))})"
@@ -131,6 +138,7 @@ module H2
         when SQL::RowConstructor then "ROW(#{node.expressions.map { render.call(it) }.join(', ')})"
         when SQL::ArrayConstructor then "ARRAY[#{node.expressions.map { render.call(it) }.join(', ')}]"
         when SQL::ArrayElement then "(#{render.call(node.array)})[#{render.call(node.index)}]"
+        when SQL::FieldReference then "(#{render.call(node.expression)}).#{identifier(node.name)}"
         when SQL::ArrayQuery then "ARRAY(#{query(node.query, parameters: parameters, ctes: ctes)})"
         when SQL::Subquery then "(#{query(node.query, parameters: parameters, ctes: ctes)})"
         when SQL::Exists then "EXISTS(#{query(node.query, parameters: parameters, ctes: ctes)})"

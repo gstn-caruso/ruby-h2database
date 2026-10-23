@@ -55,7 +55,7 @@ module H2
           optimized = @evaluator.optimized_expression(node)
           return optimized unless optimized == node
         end
-        if (node.is_a?(ArrayConstructor) || node.is_a?(ArrayElement) ||
+        if (node.is_a?(RowConstructor) || node.is_a?(ArrayConstructor) || node.is_a?(ArrayElement) || node.is_a?(FieldReference) ||
             (node.is_a?(Function) && ArrayFunctions::ARITIES.key?(node.name))) && statically_typed?(node)
           @evaluator.validate(node)
         end
@@ -182,7 +182,7 @@ module H2
         when TimeZoneExpression
           !node.zone.nil? && children(node).all? { foldable?(it) } &&
             @evaluator.type_of(node.expression).name.end_with?("WITH TIME ZONE")
-        when Unary, Binary, Predicate, RowConstructor, ArrayConstructor, ArrayElement, QuantifiedArray,
+        when Unary, Binary, Predicate, RowConstructor, ArrayConstructor, ArrayElement, FieldReference, QuantifiedArray,
           JsonFormat, JsonPredicate, TypePredicate, JsonConstructor
           children(node).all? { foldable?(it) }
         when Function
@@ -193,6 +193,8 @@ module H2
       end
 
       def relevant?(node)
+        return true if node.is_a?(FieldReference)
+        return true if node.is_a?(Cast) && node.type.is_a?(RowType)
         return true if node.is_a?(Cast) && node.type.name == "ENUM"
         return true if node.is_a?(Function) && BitFunctions::ARITIES.key?(node.name)
         return true if node.is_a?(Function) && MathFunctions::ARITIES.key?(node.name)

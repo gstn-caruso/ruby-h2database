@@ -237,6 +237,11 @@ class UpstreamTest < DatabaseTest
     [*(0..12), 15, 20, 21].each { check_case(script.cases.fetch(it)) }
   end
 
+  def test_original_row_values_declarations_and_casts
+    script = UpstreamScript.new(File.join(ROOT,'datatypes/row.sql'))
+    (0..35).each { check_case(script.cases.fetch(it)) }
+  end
+
   private
 
   def check_case(scenario)

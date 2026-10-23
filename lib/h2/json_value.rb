@@ -80,6 +80,13 @@ module H2
       self.class.from_node(node.value[index - 1])
     end
 
+    def field(name)
+      return nil unless node.kind == :object
+
+      entry = node.value.find { CharacterString.sort_key(it.first) == CharacterString.sort_key(name) }
+      entry && self.class.from_node(entry.last)
+    end
+
     def unique_keys?
       pending = [node]
       until pending.empty?

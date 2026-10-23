@@ -26,6 +26,7 @@ module H2
     RowConstructor = Data.define(:expressions)
     ArrayConstructor = Data.define(:expressions)
     ArrayElement = Data.define(:array, :index)
+    FieldReference = Data.define(:expression, :name)
     ArrayQuery = Data.define(:query)
     Subquery = Data.define(:query)
     Exists = Data.define(:query)

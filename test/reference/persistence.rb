@@ -282,6 +282,18 @@ queries.concat(['TABLE enum_source ORDER BY e','TABLE enum_saved ORDER BY e','TA
 changes.concat(["INSERT INTO enum_source(e) VALUES(' E16 ')","DELETE FROM enum_source WHERE e='e1'",'INSERT INTO enum_saved DEFAULT VALUES',
   "INSERT INTO enum_source VALUES('e2',ARRAY['A'])",'INSERT INTO enum_ctas SELECT e,CAST(e AS INT),ROW(e,a) FROM enum_source'])
 
+schema.concat([
+  'CREATE TABLE named_rows(id INT PRIMARY KEY,r ROW(a INT,b VARCHAR(5)),n ROW(x ROW(v INT),a INT ARRAY[2]))',
+  "INSERT INTO named_rows VALUES(1,ROW(1,'one'),ROW(ROW(7),ARRAY[1,2])),(2,ROW(2,'two'),NULL)",
+  'CREATE TABLE named_defaults(r ROW(a INT,b VARCHAR(5)) DEFAULT (SELECT r FROM named_rows WHERE id=1),v INT DEFAULT (SELECT (r).a FROM named_rows WHERE id=1))',
+  'INSERT INTO named_defaults DEFAULT VALUES','CREATE TABLE named_copy AS SELECT r,n FROM named_rows',
+  'CREATE TABLE named_empty AS SELECT r FROM named_rows WHERE FALSE'
+])
+queries.concat(['TABLE named_rows ORDER BY id','SELECT (r).a AS a,(r).b AS b,((n).x).v AS v FROM named_rows ORDER BY id',
+  'TABLE named_defaults ORDER BY r','TABLE named_copy ORDER BY r','TABLE named_empty ORDER BY r'])
+changes.concat(["UPDATE named_rows SET r=ROW(4,'four') WHERE id=1",'INSERT INTO named_defaults DEFAULT VALUES',
+  'INSERT INTO named_copy SELECT r,n FROM named_rows WHERE id=1','INSERT INTO named_empty SELECT r FROM named_rows WHERE id=2'])
+
 intervals = [
   ["YEAR", "1"], ["MONTH", "2"], ["DAY", "3"], ["HOUR", "4"], ["MINUTE", "5"], ["SECOND", "6.123456789"],
   ["YEAR TO MONTH", "1-2"], ["DAY TO HOUR", "1 2"], ["DAY TO MINUTE", "1 2:3"], ["DAY TO SECOND", "1 2:3:4.123456789"],

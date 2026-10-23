@@ -11,7 +11,7 @@ module H2
     end
 
     def to_s
-      "[#{values.map do |value|
+      parts = values.map do |value|
         case value
         when nil then 'null'
         when true then 'TRUE'
@@ -20,12 +20,14 @@ module H2
         when String then BinaryString.text(value)
         else value.to_s
         end
-      end.join(', ')}]"
+      end
+      CharacterString.join(['[',CharacterString.join(parts,', '),']'])
     end
   end
 
   class ArrayType < Data.define(:element_type, :precision)
     def name = "#{SQLTypeName.format(element_type)} ARRAY"
+    def type_name = SQLTypeName.metadata(self)
     def scale = 0
     def dimensions = 1 + (element_type.is_a?(ArrayType) ? element_type.dimensions : 0)
 

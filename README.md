@@ -231,6 +231,27 @@ Results use immutable `H2::EnumValue` objects. For typed parameters, create a de
 
 Ordinals start at one by default. `H2.connect(zero_based_enums: true)` and CLI `--zero-based-enums` start them at zero, matching H2's `ZERO_BASED_ENUMS` setting. This choice is not stored in the file: supply the same option when reopening. For zero-based typed parameters, use `type.value('high', zero_based: true)`. ENUM columns, arrays, keys, CTAS and dynamic defaults survive native/JDBC cross-reading and cross-writing. Precision counts UTF-16 units, including preserved isolated surrogates. Domains, ALTER TYPE, views and complete composite metadata remain migration work.
 
+## Named row values
+
+`ROW(id INT, label VARCHAR(20))` declares a structured value with ordered, named fields. Types can nest rows and arrays. Access a field with `(value).field`; parentheses distinguish a row expression from a table qualifier. Quoted field names retain their case.
+
+```ruby
+H2.connect do |connection|
+  connection.execute("CREATE TABLE items(details ROW(id INT,label VARCHAR(20)))")
+  connection.execute("INSERT INTO items VALUES(ROW(1,'first'))")
+  p connection.execute("SELECT (details).id,(details).label FROM items").rows
+  # => [[1, "first"]]
+  type = connection.execute("TABLE items").types.first
+  p type.names # => ["ID", "LABEL"]
+end
+```
+
+Results use immutable `H2::RowValue` objects with `.values` and an optional `.type`; row descriptors expose `.names`, `.fields`, `.type_name`, `.precision` and `.scale`. Bare constructors generate names `C1`, `C2`, etc. For typed bindings, construct `H2::RowType.new(fields: [...], names: [...])` and call `type.convert(H2::RowValue.new([...]))`. Use an explicit SQL cast before accessing fields of a parameter during preparation.
+
+Named fields and nested descriptors survive sets, CTAS, keys, arrays, captured parameters, dynamic defaults and native/JDBC file access. Decimal display retains each field's scale, and composite text preserves UTF-16 units. Duplicate names raise 42121; declarations and values allow at most 16,384 fields. Empty values `ROW()` and `()` are valid, while empty type declarations are syntax errors.
+
+Field access also selects the first matching member of a JSON object. Missing members and non-object JSON values produce SQL NULL; a JSON null member remains JSON null. The reference Java snapshot has defects in mixed row conversion and empty-row catalog reopen; native conversion treats each field independently and native files retain empty rows. [MIGRATION.md](MIGRATION.md) records these differences and their separate checks. Domains, complete composite metadata/conversion behavior, temporary tables and full INFORMATION_SCHEMA remain pending.
+
 ## Rounding numbers and truncating dates
 
 `ROUND(value[, scale])` rounds decimal ties away from zero. `TRUNC` / `TRUNCATE` discard the fractional part toward zero; `FLOOR` rounds down and `CEIL` / `CEILING` round up. A negative scale selects digits before the decimal point. Scales range from -100,000 to 100,000; invalid scales raise 90008, and integer overflow raises 22003.

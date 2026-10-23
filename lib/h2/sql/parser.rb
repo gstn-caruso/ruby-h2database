@@ -249,6 +249,7 @@ module H2
 
       def base_type
         name = take.value
+        return row_type if name == "ROW"
         return enum_type if name == "ENUM"
         if name == "NUMBER"
           return Type.new("DECFLOAT", 40, 0) unless current.value == "("
@@ -330,6 +331,24 @@ module H2
         end
         Type.new(name: "NUMERIC", precision: precision, scale: scale, declared_scale: declared_scale,
           declared_name: declared_name, declared_precision: declared_precision)
+      end
+
+      def row_type
+        expect("(")
+        fields, names = [], []
+        loop do
+          names << identifier
+          raise Error.new(42001, "Expected ROW field type") if keyword?(")") || keyword?(",")
+
+          fields << parse_type
+          break unless accept(",")
+        end
+        expect(")")
+        RowType.new(fields: fields, names: names)
+      rescue Error => error
+        raise Error.new(42001, "Invalid ROW declaration") if error.code == 42000
+
+        raise
       end
 
       def enum_type
@@ -800,6 +819,8 @@ module H2
           elsif accept("[")
             left = ArrayElement.new(left, expression)
             expect("]")
+          elsif accept(".")
+            left = FieldReference.new(left, identifier)
           elsif keyword?("AT") && (@tokens[@position + 1]&.value == "LOCAL" ||
               (@tokens[@position + 1]&.value == "TIME" && @tokens[@position + 2]&.value == "ZONE"))
             take
@@ -999,7 +1020,7 @@ module H2
           node
         when "ROW"
           expect("(")
-          expressions = keyword?(")") ? [] : list { expression }
+          expressions = keyword?(")") ? [] : row_elements
           expect(")")
           RowConstructor.new(expressions)
         when "ARRAY"
@@ -1016,10 +1037,12 @@ module H2
         when "("
           if query_start?
             node = Subquery.new(query)
+          elsif keyword?(")")
+            node = RowConstructor.new([])
           else
             node = expression
             if accept(",")
-              node = RowConstructor.new([node, *list { expression }])
+              node = RowConstructor.new([node, *row_elements])
             end
           end
           expect(")")
@@ -1040,6 +1063,14 @@ module H2
           else
             syntax("expression")
           end
+        end
+      end
+
+      def row_elements
+        list do
+          raise Error.new(42001, "Expected row field expression") if keyword?(")") || keyword?(",")
+
+          expression
         end
       end
 

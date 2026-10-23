@@ -32,6 +32,11 @@ module H2
       a, b = left, right
       a = a.fields.first while a.is_a?(RowType) && a.fields.length == 1
       b = b.fields.first while b.is_a?(RowType) && b.fields.length == 1
+      if [a,b].any? { it.is_a?(RowType) } && [a,b].none? { %w[NULL UNKNOWN].include?(it.name) }
+        unless [a,b].all? { it.is_a?(RowType) } && a.fields.length == b.fields.length
+          raise Error.new(90110, "SQL row types are not comparable")
+        end
+      end
       if [a,b].all? && ![a,b].any? { it.is_a?(RowType) } && [a,b].any? { it.name == "ENUM" } &&
           ([a,b].map(&:name) - %w[ENUM CHAR VARCHAR NULL UNKNOWN]).any?
         raise Error.new(90110, "SQL ENUM types are not comparable")
@@ -86,10 +91,10 @@ module H2
         width = types.find { it.is_a?(RowType) }.fields.length
         types = types.map { it.is_a?(RowType) ? it : RowType.new([it]) } if width == 1
         unless types.all? { it.is_a?(RowType) && it.fields.length == types.first.fields.length }
-          raise Error.new(90110, "Row types are not comparable")
+          raise Error.new(21002, "Row column counts do not match")
         end
 
-        return RowType.new(Array.new(types.first.fields.length) { |index| common(types.map { it.fields[index] }) })
+        return RowType.new(fields: Array.new(types.first.fields.length) { |index| common(types.map { it.fields[index] }) }, names: types.first.names)
       end
       return types.reduce { ArrayType.common(_1, _2) } if types.any? { it.is_a?(ArrayType) }
       return EnumType.common(types) if types.any? { it.name == "ENUM" }
