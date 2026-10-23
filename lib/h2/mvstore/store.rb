@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+require "monitor"
+require "digest"
+
 module H2
   module MVStore
     class Store
@@ -18,7 +21,7 @@ module H2
         raise ArgumentError, "At least two keys per page are required" unless keys_per_page.is_a?(Integer) && keys_per_page >= 2
         raise ArgumentError, "Unknown compression" unless [:none, :fast, :high].include?(compression)
 
-        @mutex = Mutex.new
+        @mutex = Monitor.new
         @read_only, @compression, @keys_per_page = read_only, compression, keys_per_page
         @maps = {}
         @closed = false
@@ -77,6 +80,74 @@ module H2
           check_open
           @metadata.keys.filter_map { it.delete_prefix("name.") if it.start_with?("name.") }.freeze
         end
+      end
+
+      def read_only?
+        @read_only
+      end
+
+      def has_map?(name)
+        synchronize { check_open; @metadata.key?("name.#{name}") }
+      end
+
+      def find_map(id)
+        synchronize do
+          check_open
+          description = @metadata["map.#{id.to_s(16)}"]
+          open_map(DataUtils.parse_map(description).fetch("name")) if description
+        end
+      end
+
+      def open_registered_map(name, key_type:, value_type:)
+        synchronize do
+          check_writable
+          registry = open_map("_", key_type: :string, value_type: :meta)
+          key_type, value_type = Codecs.fetch(key_type), Codecs.fetch(value_type)
+          references = [key_type, value_type].map do |type|
+            buffer = Buffer.new
+            Codecs::META.write(buffer, type)
+            reference = "ruby.#{Digest::SHA256.hexdigest(buffer.data)}"
+            existing = registry[reference]
+            raise Error.new(100, "Conflicting registered data type") if existing && existing != type
+
+            registry[reference] = type unless existing
+            reference
+          end
+          map = open_map(name, key_type: key_type, value_type: value_type)
+          key = "map.#{map.id.to_s(16)}"
+          values = DataUtils.parse_map(@metadata.fetch(key)).merge("key" => references[0], "val" => references[1])
+          @metadata[key] = DataUtils.dump_map(values)
+          @meta_dirty = true
+          map
+        end
+      end
+
+      def remove_map(name)
+        synchronize do
+          check_writable
+          id = @metadata.delete("name.#{name}")
+          return false unless id
+
+          @metadata.delete("map.#{id}")
+          @layout.delete("root.#{id}")
+          @maps.delete(name)&.invalidate
+          @meta_dirty = true
+          true
+        end
+      end
+
+      def claim_transactions(owner)
+        synchronize do
+          check_open
+          if @transaction_owner && !@transaction_owner.closed?
+            raise Error.new(103, "MVStore already has a transaction coordinator")
+          end
+          @transaction_owner = owner
+        end
+      end
+
+      def release_transactions(owner)
+        synchronize { @transaction_owner = nil if @transaction_owner.equal?(owner) }
       end
 
       def open_map(name, key_type: nil, value_type: nil)
@@ -162,6 +233,15 @@ module H2
         @closed
       end
 
+      def close_immediately
+        synchronize do
+          return if @closed
+
+          @closed = true
+          @storage.close
+        end
+      end
+
       private
 
       def resolve_type(registration, requested)
@@ -174,6 +254,10 @@ module H2
       end
 
       def registered_types
+        if (registry = @maps["_"]) && registry.value_type == Codecs::META
+          return registry.snapshot.to_h
+        end
+
         @registered_types ||= begin
           id = DataUtils.hex(@metadata, "name._")
           raise Error.new(6, "Missing storage type registry") if id.zero?
