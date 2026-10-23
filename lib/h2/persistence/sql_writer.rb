@@ -42,7 +42,7 @@ module H2
         case value.name
         when *(Temporal::NAMES - ["DATE"])
           value.name.sub(/\A(TIMESTAMP|TIME)/) { "#{it}(#{value.scale || (Temporal.time_type?(value.name) ? 0 : 6)})" }
-        when "NUMERIC", "REAL", "DOUBLE", "JSON", "DECFLOAT" then SQLTypeName.format(value)
+        when "NUMERIC", "REAL", "DOUBLE", "JSON", "DECFLOAT", "BLOB", "CLOB" then SQLTypeName.format(value)
         when "VARCHAR", "CHAR", "BINARY", "VARBINARY" then value.precision ? "#{value.name}(#{value.precision})" : value.name
         else value.name
         end
@@ -62,6 +62,10 @@ module H2
           end
         when UUIDValue then "UUID '#{value}'"
         when JsonValue then value.sql
+        when BlobValue, ClobValue
+          return value.sql unless value.precision.zero?
+
+          value.is_a?(BlobValue) ? "CAST(X'' AS BINARY LARGE OBJECT)" : "CAST('' AS CHARACTER LARGE OBJECT)"
         when DecfloatValue then value.sql
         when IntervalValue then value.to_s
         when DateValue, TimeValue, TimestampValue, TimeTimeZoneValue, TimestampTimeZoneValue then "#{Temporal.name(value)} '#{value}'"

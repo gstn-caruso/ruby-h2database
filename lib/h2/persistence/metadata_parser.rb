@@ -90,6 +90,14 @@ module H2
         super
       end
 
+      def lob_type(name)
+        if keyword?('(') && @tokens[@position + 1]&.value == 0 && @tokens[@position + 2]&.value == ')'
+          3.times { take }
+          return Type.new(name: name,precision: 0,scale: 0,declared_precision: 0)
+        end
+        super
+      end
+
       def distinct_nulls
         expect("DISTINCT") if accept("NULLS")
       end

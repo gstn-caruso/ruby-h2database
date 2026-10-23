@@ -9,7 +9,8 @@ module H2
         return nil if value.nil?
 
         result = begin
-          json = value.is_a?(JsonValue) ? value : (JsonValue.parse(value) if value.is_a?(String))
+          source = value.is_a?(BlobValue) ? value.bytes : (value.is_a?(ClobValue) ? value.to_s : value)
+          json = source.is_a?(JsonValue) ? source : (JsonValue.parse(source) if source.is_a?(String))
           json && (node.item_type == :value || node.item_type == json.kind) && (!node.unique_keys || json.unique_keys?)
         rescue Error
           false
@@ -28,7 +29,7 @@ module H2
       def format(value, type)
         return nil if value.nil?
 
-        value.is_a?(String) && !BinaryString.binary?(value) ? JsonValue.parse(value) : JsonValue.convert(value, source_type: type)
+        value.is_a?(ClobValue) || (value.is_a?(String) && !BinaryString.binary?(value)) ? JsonValue.parse(value.to_s) : JsonValue.convert(value, source_type: type)
       end
 
       def construct(node, entries)

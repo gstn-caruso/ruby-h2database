@@ -5,14 +5,15 @@ module H2
     module ValueAdapter
       module_function
 
-      def encode(value, type)
+      def encode(value, type, lobs: nil, table_id: nil, previous: nil)
         return MVStore::Value.new(:null, nil) if value.nil?
         if type.is_a?(ArrayType)
-          return MVStore::Value.new(:array, value.values.map { encode(it, type.element_type) })
+          return MVStore::Value.new(:array, value.values.each_with_index.map { |item,index| encode(item,type.element_type,lobs: lobs,table_id: table_id,previous: previous&.type == :array ? previous.data[index] : nil) })
         end
         if type.is_a?(RowType)
-          return MVStore::Value.new(:row, type.fields.each_with_index.map { |field, index| encode(value.values[index], field) })
+          return MVStore::Value.new(:row, type.fields.each_with_index.map { |field, index| encode(value.values[index],field,lobs: lobs,table_id: table_id,previous: previous&.type == :row ? previous.data[index] : nil) })
         end
+        return lobs.encode(value,table_id: table_id,previous: previous) if H2::LobValues::NAMES.include?(type.name) && lobs
         if Intervals.name?(type.name)
           return MVStore::Value.new(:interval, [value.ordinal, value.negative, value.leading, value.remaining])
         end
@@ -42,19 +43,20 @@ module H2
         MVStore::Value.new(kind, data)
       end
 
-      def decode(value, type, context: nil)
+      def decode(value, type, context: nil, lobs: nil)
         return nil if value.type == :null
         if type.is_a?(ArrayType)
           raise Error.new(90030, "Stored value is not an array") unless value.type == :array
 
-          return type.convert(ArrayValue.new(value.data.map { decode(it, type.element_type, context: context) }, type.element_type), context: context)
+          return type.convert(ArrayValue.new(value.data.map { decode(it, type.element_type, context: context,lobs: lobs) }, type.element_type), context: context)
         end
         if type.is_a?(RowType)
           unless value.type == :row && value.data.length == type.fields.length
             raise Error.new(90030, "Stored row does not match its column type")
           end
-          return RowValue.new(values: type.fields.each_with_index.map { |field, index| decode(value.data[index], field, context: context) }, type: type)
+          return RowValue.new(values: type.fields.each_with_index.map { |field, index| decode(value.data[index], field, context: context,lobs: lobs) }, type: type)
         end
+        return type.convert(lobs.decode(value),context: context) if [:blob,:clob].include?(value.type) && lobs
         data = case value.type
         when :date then DateValue.from_packed(value.data)
         when :time then TimeValue.new(value.data)

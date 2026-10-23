@@ -55,6 +55,16 @@ class UpstreamTest < DatabaseTest
     [0, 2, *(7..20), *(28..31), 33, 36, 37].each { check_case(script.cases.fetch(it)) }
   end
 
+  def test_original_blob_statements_except_information_schema
+    script = UpstreamScript.new(File.join(ROOT,'datatypes/blob.sql'))
+    [0,2,3,*(5..12)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_clob_statements_except_information_schema
+    script = UpstreamScript.new(File.join(ROOT,'datatypes/clob.sql'))
+    [0,2,3,*(5..13)].each { check_case(script.cases.fetch(it)) }
+  end
+
   def test_original_set_query_ordering_pagination_and_row_membership
     script = UpstreamScript.new(File.join(ROOT, "queries/select.sql"))
     [*(42..46), *(149..156)].each { check_case(script.cases.fetch(it)) }
@@ -294,6 +304,8 @@ class UpstreamTest < DatabaseTest
       else text
       end
     when Float then H2::JsonValue.float_text(value, real: type&.name == "REAL")
+    when H2::BlobValue then "X'#{value.bytes.unpack1('H*')}'"
+    when H2::ClobValue then text(value.to_s,type)
     when String then H2::BinaryString.binary?(value) ? "X'#{value.unpack1('H*')}'" : value.gsub("\r\n", "\n").tr("\n", " ").gsub(/ +/, " ")
     else value.to_s
     end

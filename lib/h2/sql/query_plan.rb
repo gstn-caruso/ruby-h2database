@@ -289,6 +289,7 @@ module H2
           when UUIDValue then "UUID '#{node.value}'"
           when EnumValue then CharacterString.sql(node.value.label)
           when JsonValue then node.value.sql
+          when BlobValue, ClobValue then node.value.sql
           when DecfloatValue then node.value.special ? "'#{node.value}'" : node.value.to_s
           when IntervalValue then node.value.to_s
           when DateValue, TimeValue, TimestampValue, TimeTimeZoneValue, TimestampTimeZoneValue then "#{Temporal.name(node.value)} '#{node.value}'"

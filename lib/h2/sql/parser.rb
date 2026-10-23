@@ -270,6 +270,19 @@ module H2
         end
         declared_name = "DECIMAL" if %w[DEC DECIMAL].include?(name)
         name = TYPE_NAMES.fetch(name, name)
+        if name == 'NATIONAL'
+          expect('CHARACTER')
+          name = 'CHAR'
+        elsif name == 'NCHAR'
+          name = 'CHAR'
+        end
+        if %w[CHAR BINARY].include?(name) && accept('LARGE')
+          expect('OBJECT')
+          name = name == 'CHAR' ? 'CLOB' : 'BLOB'
+        end
+        name = 'BLOB' if %w[TINYBLOB MEDIUMBLOB LONGBLOB IMAGE].include?(name)
+        name = 'CLOB' if name == 'NCLOB'
+        return lob_type(name) if LobValues::NAMES.include?(name)
         return numeric_type(declared_name) if name == "NUMERIC"
         return Type.new("NULL", nil, nil) if name == "NULL"
         if name == "DECFLOAT"
@@ -315,6 +328,26 @@ module H2
           end
         end
         Type.new(name, precision, nil)
+      end
+
+      def lob_type(name)
+        precision = LobValues::MAX_PRECISION
+        declared = nil
+        if accept('(')
+          precision = numeric_type_integer('BIGINT')
+          if current.kind == :word && %w[K M G T P].include?(current.value)
+            precision *= 1 << (10 * (%w[K M G T P].index(take.value) + 1))
+          end
+          unless precision.positive? && precision <= LobValues::MAX_PRECISION
+            raise Error.new(90008,'Invalid LOB precision')
+          end
+          if name == 'CLOB'
+            accept('CHARACTERS') || accept('OCTETS')
+          end
+          raise Error.new(42001,'Expected LOB closing parenthesis') unless accept(')')
+          declared = precision
+        end
+        Type.new(name: name,precision: precision,scale: 0,declared_precision: declared)
       end
 
       def numeric_type(declared_name)

@@ -57,6 +57,7 @@ module H2
       when false then "FALSE"
       when BigDecimal then type&.name == "NUMERIC" ? ArrayType.decimal_text(value,type.scale) : value.to_s("F")
       when Float then JsonValue.float_text(value, real: type&.name == "REAL")
+      when BlobValue then "X'#{value.bytes.unpack1('H*')}'"
       when String
         return "X'#{value.unpack1('H*')}'" if BinaryString.binary?(value)
 
