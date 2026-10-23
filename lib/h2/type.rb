@@ -179,9 +179,11 @@ module H2
       when "REAL"
         input = numeric_input(value)
         number = input.is_a?(String) ? NumericText.floating(input, real: true) : NumericText.real_value(input)
+        return Float::NAN if number.nan?
         number.zero? ? 0.0 : number
       when "DOUBLE"
         number = floating(value)
+        return Float::NAN if number.nan?
         number.zero? ? 0.0 : number
       when "BOOLEAN"
         boolean(value)

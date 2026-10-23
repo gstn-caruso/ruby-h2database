@@ -83,6 +83,7 @@ module H2
           function_type(node) if datetime_function?(node)
           function_type(node) if ArrayFunctions::ARITIES.key?(node.name)
           function_type(node) if MathFunctions::ARITIES.key?(node.name)
+          function_type(node) if node.name == "MOD"
         when Default, Star
           raise Error.new(42000, "Invalid expression #{node.class.name.split('::').last}")
         else
@@ -228,7 +229,10 @@ module H2
           case node.operator
           when "NOT" then !boolean(value)
           when "+" then value.is_a?(IntervalValue) || value.is_a?(DecfloatValue) ? value : numeric(value)
-          when "-" then value.is_a?(IntervalValue) || value.is_a?(DecfloatValue) ? value.negate : check_integer(-numeric(value), node)
+          when "-"
+            return type_of(node).convert(-value) if value.is_a?(Float)
+
+            value.is_a?(IntervalValue) || value.is_a?(DecfloatValue) ? value.negate : check_integer(-numeric(value), node)
           end
         when Binary then binary(node, row, group)
         when IntervalDifference
@@ -362,7 +366,7 @@ module H2
           left = boolean(left) ? 1 : 0
           right = boolean(right) ? 1 : 0
         end
-        result = left <=> right
+        result = FloatingOperations.compare(left, right)
         raise Error.new(22018, "Cannot compare #{left.inspect} and #{right.inspect}") if result.nil?
 
         result
@@ -497,6 +501,7 @@ module H2
           return TemporalOperations.type(node.operator, *types) if types.any? { Temporal::NAMES.include?(it&.name) }
 
           type = Type.common(types)
+          return FloatingOperations.type(type) if FloatingOperations::NAMES.include?(type.name)
           if node.operator == "%" && type.name == "DECFLOAT"
             return types.last if (%w[NUMERIC REAL DOUBLE DECFLOAT] + Type::INTEGER_LIMITS.keys).include?(types.last.name)
             return type
@@ -561,7 +566,7 @@ module H2
         end
         if node.is_a?(Binary) && %w[+ - * /].include?(node.operator) && constant?(node)
           type = type_of(node)
-          if %w[NUMERIC DECFLOAT].include?(type.name) || Type::INTEGER_LIMITS.key?(type.name)
+          if %w[NUMERIC DECFLOAT REAL DOUBLE].include?(type.name) || Type::INTEGER_LIMITS.key?(type.name)
             return NumericOperations.literal(evaluate(node), type)
           end
         end
@@ -887,10 +892,11 @@ module H2
         compare(left, right)
       end
 
-      def in_values(value, candidates)
+      def in_values(value, candidates, types)
         unknown = false
-        candidates.each do |candidate|
-          result = equals(value, candidate)
+        candidates.each_with_index do |candidate, index|
+          left, right = comparison_pair(value, candidate, types.first, types[index + 1])
+          result = equals(left, right)
           return true if result == true
 
           unknown = true if result.nil?
@@ -968,20 +974,20 @@ module H2
         when "ABS", "MIN", "MAX", "NULLIF" then argument_type
         when "COALESCE", "IFNULL" then Type.common(node.arguments.map { type_of(it) })
         when "MOD"
-          divisor_type = type_of(node.arguments.last)
-          (%w[NUMERIC REAL DOUBLE DECFLOAT] + Type::INTEGER_LIMITS.keys).include?(divisor_type.name) ? divisor_type : Type.common(node.arguments.map { type_of(it) })
+          NumericOperations.modulus_type(node.arguments.map { type_of(it) })
         when "SUM"
           return nil unless argument_type
           case argument_type.name
           when "TINYINT", "SMALLINT", "INTEGER" then Type.new("BIGINT", nil, 0)
           when "BIGINT" then Type.new("NUMERIC", 100_000, 0)
+          when "REAL" then Type.new("DOUBLE", 53, nil)
           else argument_type
           end
         when "AVG"
           if argument_type && %w[BIGINT NUMERIC].include?(argument_type.name)
             Type.new("NUMERIC", 100_000, (argument_type.scale || 0) + 10)
           else
-            Type.new("DOUBLE", nil, nil)
+            Type.new("DOUBLE", 53, nil)
           end
         end
       end
@@ -998,21 +1004,21 @@ module H2
         raise Error.new(22018, "Cannot convert #{value.inspect} to number")
       end
 
-      def character_pair(left, right, left_type, right_type)
+      def comparison_pair(left, right, left_type, right_type)
         if [left_type, right_type].any? { it&.name == "CHAR" } &&
             [left, right].all? { it.is_a?(String) && !BinaryString.binary?(it) }
           return [left, right].map { CharacterString.trim_spaces(it) }
         end
-        [left, right]
+        FloatingOperations.comparison_pair(left, right, [left_type, right_type])
       end
 
       def array_pairs(left, right)
         count = [left.values.length, right.values.length].min
-        left.values.first(count).zip(right.values).map { |a, b| character_pair(a, b, left.element_type, right.element_type) }
+        left.values.first(count).zip(right.values).map { |a, b| comparison_pair(a, b, left.element_type, right.element_type) }
       end
 
       def value_equals(left, right, left_type: nil, right_type: nil)
-        left, right = character_pair(left, right, left_type, right_type)
+        left, right = comparison_pair(left, right, left_type, right_type)
         compare(left, right, untyped: true).zero?
       end
 
@@ -1025,6 +1031,14 @@ module H2
 
       def binary(node, row, group)
         left = evaluate(node.left, row, group)
+        if %w[+ - * /].include?(node.operator)
+          sources = [type_of(node.left), type_of(node.right)]
+          result_type = type_of(node)
+          if FloatingOperations::NAMES.include?(result_type.name)
+            return FloatingOperations.evaluate(node.operator, result_type, sources,
+              ->(index) { index.zero? ? left : evaluate(node.right, row, group) })
+          end
+        end
         if node.operator == "||" && (type = type_of(node)).is_a?(ArrayType)
           left = type.coerce(left, context: context)
           return nil if left.nil?
@@ -1071,6 +1085,9 @@ module H2
         end
         if %w[= <> != < > <= >=].include?(node.operator) && (left.is_a?(RowValue) ^ right.is_a?(RowValue))
           raise Error.new(22018, "Cannot compare row and scalar values")
+        end
+        if %w[= <> != < > <= >=].include?(node.operator)
+          left, right = FloatingOperations.comparison_pair(left, right, [type_of(node.left), type_of(node.right)])
         end
 
         case node.operator
@@ -1129,18 +1146,20 @@ module H2
             node.operator == :is_not ? !result : result
           end
         when :distinct, :not_distinct
+          left, right = comparison_pair(left, right, *node.arguments.first(2).map { type_of(it) })
           equal = equals(left, right, null_safe: true)
           node.operator == :not_distinct ? equal : !equal
         when :between
-          lower_comparison = nullable_compare(left, right)
-          upper_comparison = nullable_compare(left, extra)
+          types = node.arguments.map { type_of(it) }
+          lower_comparison = nullable_compare(*comparison_pair(left, right, *types.first(2)))
+          upper_comparison = nullable_compare(*comparison_pair(left, extra, types[0], types[2]))
           low = lower_comparison.nil? ? nil : lower_comparison >= 0
           high = upper_comparison.nil? ? nil : upper_comparison <= 0
           return false if low == false || high == false
 
           low.nil? || high.nil? ? nil : true
         when :in
-          in_values(left, values.drop(1))
+          in_values(left, values.drop(1), node.arguments.map { type_of(it) })
         when :like
           return nil if values.any?(&:nil?)
           raise Error.new(22025, "ESCAPE must be zero or one character") unless extra.is_a?(String) && extra.length <= 1
@@ -1197,6 +1216,9 @@ module H2
           end
           return nil
         end
+        if node.name == "MOD"
+          return modulus(node, row, group)
+        end
         values = node.arguments.map { evaluate(it, row, group) }
         first, second = values
         if node.name == "NULLIF"
@@ -1226,6 +1248,8 @@ module H2
         when "ABS"
           return first.abs if first.is_a?(DecfloatValue)
 
+          return type_of(node).convert(first.abs) if first.is_a?(Float)
+
           first.is_a?(IntervalValue) ? (first.negative ? first.negate : first) : check_integer(numeric(first).abs, node)
         when "SIGN"
           return first.signum if first.is_a?(DecfloatValue)
@@ -1233,16 +1257,27 @@ module H2
           raise Error.new(50100, "SIGN is unavailable for this value type") unless first.is_a?(Numeric)
 
           first.respond_to?(:nan?) && first.nan? ? 0 : first <=> 0
-        when "MOD"
-          types = node.arguments.map { type_of(it) }
-          if Type.common(types).name == "DECFLOAT"
-            first, second = values.zip(types).map { |value, type| DecfloatValue.convert(value, source_type: type) }
-            return function_type(node).coerce(first.remainder(second))
-          end
-          raise Error.new(22012, "Division by zero") if numeric(second).zero?
-
-          numeric(first).remainder(numeric(second))
         end
+      end
+
+      def modulus(node, row, group)
+        first = evaluate(node.arguments.first, row, group)
+        return nil if first.nil?
+
+        second = evaluate(node.arguments.last, row, group)
+        return nil if second.nil?
+
+        sources = node.arguments.map { type_of(it) }
+        common = Type.common(sources)
+        result = if FloatingOperations::NAMES.include?(common.name)
+          FloatingOperations.evaluate("%", FloatingOperations.type(common), sources, ->(index) { index.zero? ? first : second })
+        else
+          first, second = [first,second].zip(sources).map { |value, source| common.coerce(value, source_type: source) }
+          raise Error.new(22012, "Division by zero") if second.zero?
+
+          first.remainder(second)
+        end
+        function_type(node).coerce(result, source_type: common)
       end
 
       def aggregate(node, group)
@@ -1254,7 +1289,10 @@ module H2
         return group.size if argument.is_a?(Star)
 
         values = group.map { evaluate(argument, it) }.compact
-        values = values.uniq { Temporal.comparison_key(it) } if node.distinct
+        if node.distinct
+          values = values.uniq { Temporal.comparison_key(it) }
+          values.sort! { compare(_1, _2) } if FloatingOperations::NAMES.include?(type_of(argument).name)
+        end
         return values.length if node.name == "COUNT"
         return nil if values.empty?
         if %w[SUM AVG].include?(node.name) && function_type(node).name == "DECFLOAT"
@@ -1278,7 +1316,10 @@ module H2
         end
 
         case node.name
-        when "SUM" then values.sum { numeric(it) }
+        when "SUM"
+          return FloatingOperations.sum(values) if type_of(argument).name == "REAL"
+
+          values.sum { numeric(it) }
         when "AVG"
           type = type_of(argument)
           if type && %w[BIGINT NUMERIC].include?(type.name)
@@ -1286,7 +1327,7 @@ module H2
             sum.div(BigDecimal(values.length.to_s), [sum.precision + 20, 40].max)
               .round((type.scale || 0) + 10, BigDecimal::ROUND_HALF_DOWN)
           else
-            values.sum { numeric(it).to_f } / values.length
+            Type.new("DOUBLE", 53, nil).convert(FloatingOperations.sum(values) / values.length)
           end
         when "MIN" then values.min { compare(_1, _2) }
         when "MAX" then values.max { compare(_1, _2) }

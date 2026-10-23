@@ -178,6 +178,15 @@ class UpstreamTest < DatabaseTest
     (7..9).each { check_case(script.cases.fetch(it)) }
   end
 
+  def test_original_binary_floating_special_value_matrices_with_native_table_setup
+    {'real' => ['REAL',[*(11..15),18]], 'double_precision' => ['DOUBLE',[*(7..11),14]]}.each do |name,(type,selection)|
+      execute("CREATE TABLE TEST(D #{type})")
+      execute("INSERT INTO TEST VALUES('-Infinity'),('-1'),('0'),('1'),('1.5'),('Infinity'),('NaN')")
+      script = UpstreamScript.new(File.join(ROOT,"datatypes/#{name}.sql"))
+      selection.each { check_case(script.cases.fetch(it)) }
+    end
+  end
+
   def test_original_round_except_call_and_information_schema
     script = UpstreamScript.new(File.join(ROOT,"functions/numeric/round.sql"))
     [*(0..2),5,6,*(16..18),*(20..28)].each { check_case(script.cases.fetch(it)) }

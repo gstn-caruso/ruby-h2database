@@ -238,6 +238,20 @@ queries.concat(["TABLE numeric_aliases ORDER BY i", "TABLE numeric_alias_copy OR
 changes.concat(["INSERT INTO numeric_aliases DEFAULT VALUES", "INSERT INTO numeric_aliases(i,r) VALUES('١٢٤','7.006492321624086e-46')",
   "UPDATE numeric_aliases SET d='2.345',f='0.5f' WHERE i=123", "INSERT INTO numeric_alias_copy SELECT * FROM numeric_aliases"])
 
+schema.concat([
+  'CREATE TABLE floating_source(a REAL,b REAL)', 'INSERT INTO floating_source VALUES(0.1,0.2)',
+  "CREATE TABLE floating_saved(s DOUBLE DEFAULT (SELECT CAST(a+b AS DOUBLE) FROM floating_source),p REAL DEFAULT (SELECT a*b FROM floating_source),z REAL DEFAULT -CAST(0 AS REAL),n DOUBLE DEFAULT CAST('Infinity' AS DOUBLE)%CAST(1 AS DOUBLE))",
+  'INSERT INTO floating_saved DEFAULT VALUES',
+  "CREATE TABLE floating_keys(v REAL PRIMARY KEY)",
+  "INSERT INTO floating_keys VALUES(CAST('NaN' AS REAL)),(CAST('Infinity' AS REAL)),(CAST('-Infinity' AS REAL)),(-1),(0),(1)",
+  'CREATE TABLE floating_ctas AS SELECT a+b AS s,a*b AS p,AVG(a) AS v FROM floating_source GROUP BY a,b'
+])
+queries.concat(['TABLE floating_saved ORDER BY s','TABLE floating_keys ORDER BY v','TABLE floating_ctas',
+  'SELECT MIN(v) AS lo,MAX(v) AS hi,COUNT(DISTINCT v) AS n FROM floating_keys'])
+changes.concat(['UPDATE floating_source SET a=0.3,b=0.4','INSERT INTO floating_saved DEFAULT VALUES',
+  "INSERT INTO floating_keys VALUES(CAST('NaN' AS REAL)*CAST(2 AS REAL))",'INSERT INTO floating_keys VALUES(2)',
+  'INSERT INTO floating_ctas SELECT a+b,a*b,AVG(a) FROM floating_source GROUP BY a,b'])
+
 intervals = [
   ["YEAR", "1"], ["MONTH", "2"], ["DAY", "3"], ["HOUR", "4"], ["MINUTE", "5"], ["SECOND", "6.123456789"],
   ["YEAR TO MONTH", "1-2"], ["DAY TO HOUR", "1 2"], ["DAY TO MINUTE", "1 2:3"], ["DAY TO SECOND", "1 2:3:4.123456789"],
