@@ -1,6 +1,23 @@
 # frozen_string_literal: true
 
 require "open3"
+require "bigdecimal"
+
+root = File.expand_path("../..", __dir__)
+$LOAD_PATH.unshift(File.join(root, "lib"))
+require "h2"
+jar = ENV.fetch("H2_REFERENCE_JAR", File.join(root, "h2/target/h2-2.5.259-SNAPSHOT.jar"))
+java = ENV["JAVA_HOME"] ? File.join(ENV.fetch("JAVA_HOME"), "bin/java") : "java"
+probe, error, status = Open3.capture3(java, "-cp", jar, File.join(__dir__, "JsonOracle.java"), "exponent-boundary")
+abort error unless status.success?
+version, *boundary = probe.lines.map(&:chomp)
+abort "Missing Java runtime in JSON boundary probe: #{probe}" unless version&.start_with?("J\t")
+java_version = version.delete_prefix("J\t")
+separate_boundary = case boundary
+when ["M\tJ\tJSON\t1000000000\t0", "R\t1E2147483648"] then false
+when ["E\t22018\t22018"] then true
+else abort "Unexpected Java JSON exponent boundary: #{probe}"
+end
 
 quote = ->(text) { "'" + text.gsub("'", "''") + "'" }
 samples = ['', ' ', 'null', 'true', 'false', 'NULL', '1', '001', '-01', '1.00', '-0.00', '1e100', '1.2300e-9', '0e-999',
@@ -9,19 +26,21 @@ samples = ['', ' ', 'null', 'true', 'false', 'NULL', '1', '001', '-01', '1.00', 
   '"\/"', '"\u00e9"', '"\ud83d\ude00"', '"\ud800"', '"\udc00"', '"\ud800x"', '"\u+001"', '"\u-001"', '"\uZZZZ"',
   "\"line\nbreak\"", "\"raw\u0001control\"", '"😀é§''"', "\uFEFF[1]", " \uFEFF[1]", "\u00a0[1]"]
 statements = []
+boundary_statements = []
 samples.concat(['"\u０００１"', '"\u٠٠٠١"', '"\uＦＦＦＦ"'])
 samples.concat(['1e2147483647', '1e2147483648', '1e-2147483647', '1e-2147483648'])
 samples.each do |text|
+  destination = separate_boundary && text == '1e2147483648' ? boundary_statements : statements
   expressions = []
   expressions << quote.call(text) unless text.match?(/[\x00-\x1f]/)
   %w[UTF-8 UTF-16BE UTF-16LE UTF-32BE UTF-32LE].each do |encoding|
     expressions << "X'#{text.encode(encoding).b.unpack1('H*')}'"
   end
   expressions.each do |expression|
-    statements << "SELECT #{expression} FORMAT JSON AS j;"
-    statements << "SELECT CAST(#{expression} AS JSON) AS j;"
+    destination << "SELECT #{expression} FORMAT JSON AS j;"
+    destination << "SELECT CAST(#{expression} AS JSON) AS j;"
     %w[VALUE ARRAY OBJECT SCALAR].product(['', ' WITH UNIQUE KEYS'], ['', ' NOT']).each do |item, unique, negate|
-      statements << "SELECT #{expression} IS#{negate} JSON #{item}#{unique} AS v;"
+      destination << "SELECT #{expression} IS#{negate} JSON #{item}#{unique} AS v;"
     end
   end
 end
@@ -64,11 +83,30 @@ output, error, status = Open3.capture3(RbConfig.ruby, File.join(__dir__, "compar
 abort "#{output}\n#{error}" unless status.success?
 puts "JSON: #{statements.length} generated Java comparisons passed (normalization, UTF encodings, numbers, duplicates, shapes, conversions, constructors, comparisons, bounds and UNNEST)"
 
-root = File.expand_path("../..", __dir__)
-$LOAD_PATH.unshift(File.join(root, "lib"))
-require "h2"
-jar = ENV.fetch("H2_REFERENCE_JAR", File.join(root, "h2/target/h2-2.5.259-SNAPSHOT.jar"))
-java = ENV["JAVA_HOME"] ? File.join(ENV.fetch("JAVA_HOME"), "bin/java") : "java"
+unless boundary_statements.empty?
+  canonical = '1E2147483648'
+  number = BigDecimal(canonical)
+  unless number == BigDecimal('1e2147483648') && number.split == [1, '1', 10, 2_147_483_649]
+    abort "Independent BigDecimal check failed for JSON's minimum signed 32-bit scale"
+  end
+  expected_values = [canonical, canonical]
+  %w[VALUE ARRAY OBJECT SCALAR].product(['', ' WITH UNIQUE KEYS'], ['', ' NOT']).each do |item, _unique, negate|
+    value = %w[VALUE SCALAR].include?(item)
+    expected_values << (negate.empty? ? value : !value)
+  end
+  H2.connect do |connection|
+    boundary_statements.each_with_index do |sql, index|
+      value = connection.execute(sql).rows.fetch(0).fetch(0)
+      value = value.to_s if value.is_a?(H2::JsonValue)
+      expected_value = index == 1 ? '"1e2147483648"' : expected_values.fetch(index % expected_values.length)
+      unless value == expected_value
+        abort "Native JSON exponent boundary differs from independent scalar expectations: #{sql}: #{value.inspect}"
+      end
+    end
+  end
+  puts "JSON runtime difference: Java #{java_version} rejects 1e2147483648 with 22018; #{boundary_statements.length} native SQL checks pass separately against independent BigDecimal/scalar expectations (scale -2147483648), not counted as Java matches"
+end
+
 expected, error, status = Open3.capture3(java, "-cp", jar, File.join(__dir__, "JsonOracle.java"))
 abort error unless status.success?
 executions = 0

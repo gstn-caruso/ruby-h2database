@@ -77,6 +77,13 @@ class JsonTest < DatabaseTest
     assert_sql_error 90053, "SELECT JSON_ARRAY((VALUES 1,2)) AS j WHERE FALSE"
   end
 
+  def test_json_numbers_retain_the_minimum_signed_32bit_scale
+    assert_equal '1E2147483648', H2::JsonValue.parse('1e2147483648').to_s
+    assert_equal [[true, true, false]], rows("SELECT '1e2147483648' IS JSON SCALAR,'1e2147483648' IS JSON WITH UNIQUE KEYS,'1e2147483648' IS JSON ARRAY")
+    assert_sql_error 22018, "SELECT '1e2147483649' FORMAT JSON"
+    assert_sql_error 22018, "SELECT '1e-2147483648' FORMAT JSON"
+  end
+
   def test_decfloat_conversion_keeps_precision_rounding_and_json_exponents
     result = execute("SELECT CAST(CAST('1.2300e100' AS DECFLOAT(3)) AS JSON),CAST(CAST('9.999' AS DECFLOAT(3)) AS JSON)")
     assert_equal ['1.23E100', '1E1'], result.rows.first.map(&:to_s)
