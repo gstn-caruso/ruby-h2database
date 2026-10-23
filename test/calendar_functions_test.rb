@@ -33,7 +33,7 @@ class CalendarFunctionsTest < DatabaseTest
     assert_equal [["1900-02-28", "2000-02-29", "0000-02-29", "2024-04-30"]], texts(execute("SELECT LAST_DAY(DATE '1900-02-01'),LAST_DAY(TIMESTAMP '2000-02-01 23:59:59.999999999'),LAST_DAY('0000-02-01'),LAST_DAY('2024-04-01 12:34:56')"))
     assert_sql_error 50000, "SELECT LAST_DAY('bad')"
     assert_sql_error 50000, "SELECT LAST_DAY(TIME '12:34:56')"
-    assert_sql_error 50100, "SELECT LAST_DAY('2000-01-01 12:00:00+03:00')"
+    assert_equal [[H2::DateValue.parse("2000-01-31")]], rows("SELECT LAST_DAY('2000-01-01 12:00:00+03:00')")
   end
 
   def test_static_type_checks_nulls_labels_and_declared_scales
@@ -41,7 +41,8 @@ class CalendarFunctionsTest < DatabaseTest
     assert_sql_error 90008, "SELECT DATE_TRUNC(day,NULL)"
     assert_sql_error 50100, "SELECT DATE_TRUNC(ns,TIME '12:34:56')"
     assert_sql_error 90008, "SELECT EXTRACT(day_of_month FROM DATE '2000-01-01')"
-    assert_sql_error 50100, "SELECT EXTRACT(timezone_hour FROM DATE '2000-01-01')"
+    execute("SET TIME ZONE '+03'")
+    assert_equal [[3]], rows("SELECT EXTRACT(timezone_hour FROM DATE '2000-01-01')")
     result = execute("SELECT DATE_TRUNC(day,CAST(NULL AS TIME(3))),LAST_DAY(NULL),EXTRACT(epoch FROM CAST(NULL AS DATE))")
     assert_equal [[nil, nil, nil]], result.rows
     assert_equal ["CAST(NULL AS TIME(3))", "CAST(NULL AS DATE)", "CAST(NULL AS NUMERIC(28, 9))"], result.columns

@@ -34,23 +34,23 @@ module H2
         type
       end
 
-      def evaluate(name, *values)
+      def evaluate(name, *values, context: nil)
         return nil if values.any?(&:nil?)
 
         case name
         when "DATE_TRUNC" then truncate(*values)
-        when "LAST_DAY" then last_day(values.first)
-        when "EXTRACT" then extract(*values)
+        when "LAST_DAY" then last_day(values.first, context: context)
+        when "EXTRACT" then extract(*values, context: context)
         end
       end
 
-      def last_day(value)
+      def last_day(value, context: nil)
         date = case value
         when DateValue then value
-        when TimestampValue then value.date
+        when TimestampValue, TimestampTimeZoneValue then value.date
         else
           text = value.is_a?(BigDecimal) ? value.to_s("F") : BinaryString.text(value)
-          TimestampValue.parse(text).date
+          Temporal.parse("TIMESTAMP WITH TIME ZONE", text, context: context).date
         end
         DateValue.new(date.year, date.month, DateValue.days_in_month(date.year, date.month))
       rescue Error => error
@@ -84,21 +84,17 @@ module H2
           end
           nanos = 0 unless field == "WEEK_YEAR"
         end
-        case value
-        when DateValue then date
-        when TimeValue then TimeValue.new(nanos)
-        else TimestampValue.new(date, TimeValue.new(nanos))
-        end
+        Temporal.with_components(value, date, nanos)
       rescue Error => error
         raise unless error.code == 22007
 
         raise Error.new(50000, "DATE_TRUNC is outside the supported year range")
       end
 
-      def extract(field, value)
+      def extract(field, value, context: nil)
         return value.extract(field) if value.is_a?(IntervalValue)
 
-        date, nanos = DateTimeFunctions.components(value)
+        date, nanos = DateTimeFunctions.components(value, context: context)
         case field
         when "YEAR" then date.year
         when "MONTH" then date.month
@@ -119,7 +115,10 @@ module H2
         when "ISO_WEEK", "WEEK"
           _year, start = week_year(date, iso: field == "ISO_WEEK")
           (date.absolute_day - start) / 7 + 1
-        when "EPOCH" then BigDecimal(date.absolute_day.to_s) * 86_400 + BigDecimal(nanos.to_s) / Temporal::SECOND
+        when "EPOCH" then BigDecimal(date.absolute_day.to_s) * 86_400 + BigDecimal(nanos.to_s) / Temporal::SECOND - (Temporal.zoned?(value) ? value.offset_seconds : 0)
+        when "TIMEZONE_HOUR" then IntervalUnits.divide(Temporal.offset(value, context), 3600)
+        when "TIMEZONE_MINUTE" then IntervalUnits.divide(Temporal.offset(value, context).remainder(3600), 60)
+        when "TIMEZONE_SECOND" then Temporal.offset(value, context).remainder(60)
         else raise Error.new(50100, "EXTRACT #{field} requires the remaining time-zone support")
         end
       end

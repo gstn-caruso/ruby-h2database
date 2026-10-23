@@ -34,10 +34,10 @@ module H2
         Temporal.type(result, 9)
       end
 
-      def evaluate(name, field, first, second)
+      def evaluate(name, field, first, second, context: nil)
         return nil if first.nil? || second.nil?
 
-        name == "DATEADD" ? add(field, count(first), second) : difference(field, first, second)
+        name == "DATEADD" ? add(field, count(first), second, context: context) : difference(field, first, second, context: context)
       end
 
       def count(value)
@@ -57,12 +57,13 @@ module H2
         Type.new("BIGINT", 19, 0).convert(value)
       end
 
-      def components(value)
+      def components(value, context: nil)
         case value
         when DateValue then [value, 0]
-        when TimeValue then [DateValue.new(1970, 1, 1), value.nanos]
+        when TimeValue, TimeTimeZoneValue then [DateValue.new(1970, 1, 1), value.nanos]
+        when TimestampValue, TimestampTimeZoneValue then [value.date, value.time.nanos]
         else
-          timestamp = Temporal.convert(value, "TIMESTAMP")
+          timestamp = Temporal.convert(value, "TIMESTAMP", context: context)
           [timestamp.date, timestamp.time.nanos]
         end
       end
@@ -71,13 +72,22 @@ module H2
         (value + 2**(bits - 1)) % 2**bits - 2**(bits - 1)
       end
 
-      def add(field, count, value)
+      def add(field, count, value, context: nil)
         unless %w[MILLISECOND MICROSECOND NANOSECOND].include?(field) || Type::INTEGER_LIMITS.fetch("INTEGER").cover?(count)
           raise Error.new(90008, "DATEADD count is outside INTEGER range")
         end
-        date, nanos = components(value)
+        date, nanos = components(value, context: context)
+        if field.start_with?("TIMEZONE_")
+          raise Error.new(50100, "DATEADD #{field} requires a zoned value") unless Temporal.zoned?(value)
+
+          unit = {"TIMEZONE_HOUR" => 3600, "TIMEZONE_MINUTE" => 60, "TIMEZONE_SECOND" => 1}.fetch(field)
+          offset = value.offset_seconds + count * unit
+          raise Error.new(50000, "Time zone offset exceeds 18 hours") unless (-64_800..64_800).cover?(offset)
+
+          return value.with(offset_seconds: offset)
+        end
         if YEARS.key?(field) || %w[MONTH QUARTER].include?(field)
-          invalid_time(field) if value.is_a?(TimeValue)
+          invalid_time(field) if Temporal.time?(value)
           year, month = date.year, date.month
           if YEARS.key?(field)
             year += count * YEARS.fetch(field)
@@ -89,7 +99,7 @@ module H2
           year = wrap(year, 32)
           date = DateValue.new(year, month, [date.day, DateValue.days_in_month(year, month)].min)
         elsif DAYS.include?(field) || %w[WEEK ISO_WEEK].include?(field)
-          invalid_time(field) if value.is_a?(TimeValue)
+          invalid_time(field) if Temporal.time?(value)
           date = date.add_days(count * (%w[WEEK ISO_WEEK].include?(field) ? 7 : 1))
         elsif NANOS.key?(field)
           nanos = wrap(nanos + wrap(count * NANOS.fetch(field)))
@@ -106,19 +116,15 @@ module H2
           end
           date = date.add_days(days)
           unless (0...Temporal::DAY).cover?(nanos)
-            raise Error.new(value.is_a?(TimeValue) ? 22007 : 50000, "DATEADD time is outside its day")
+            raise Error.new(Temporal.time?(value) ? 22007 : 50000, "DATEADD time is outside its day")
           end
           return TimestampValue.new(date, TimeValue.new(nanos)) if value.is_a?(DateValue)
         else
           raise Error.new(50100, "DATEADD #{field} has not been ported")
         end
-        case value
-        when DateValue then date
-        when TimeValue then TimeValue.new(nanos)
-        else TimestampValue.new(date, TimeValue.new(nanos))
-        end
+        Temporal.with_components(value, date, nanos)
       rescue Error => error
-        raise unless error.code == 22007 && date && !value.is_a?(TimeValue)
+        raise unless error.code == 22007 && date && !Temporal.time?(value)
 
         raise Error.new(50000, "DATEADD result is outside the supported year range")
       end
@@ -127,9 +133,14 @@ module H2
         raise Error.new(90008, "DATEADD #{field} is not valid for TIME")
       end
 
-      def difference(field, first, second)
-        a, a_nanos = components(first)
-        b, b_nanos = components(second)
+      def difference(field, first, second, context: nil)
+        if field.start_with?("TIMEZONE_")
+          unit = {"TIMEZONE_HOUR" => 3600, "TIMEZONE_MINUTE" => 60, "TIMEZONE_SECOND" => 1}.fetch(field)
+          offsets = [first, second].map { IntervalUnits.divide(Temporal.offset(it, context), unit) }
+          return offsets[1] - offsets[0]
+        end
+        a, a_nanos = components(first, context: context)
+        b, b_nanos = components(second, context: context)
         days = b.absolute_day - a.absolute_day
         result = if NANOS.key?(field)
           unit = NANOS.fetch(field)

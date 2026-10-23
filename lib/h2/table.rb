@@ -63,7 +63,7 @@ module H2
       keys.each do |key|
         seen = {}
         rows.each do |row|
-          values = key.columns.map { row.fetch(it) }
+          values = key.columns.map { Temporal.comparison_key(row.fetch(it)) }
           next if !key.primary && values.any?(&:nil?)
           raise Error.new(23505, "Unique key violation on #{key.columns.join(', ')}") if seen.key?(values)
 

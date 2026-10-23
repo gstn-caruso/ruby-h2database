@@ -2,7 +2,7 @@
 
 module H2
   class Type < Data.define(:name, :precision, :scale)
-    ORDER = (%w[NULL CHAR VARCHAR BINARY VARBINARY BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE DATE TIME TIMESTAMP] + Intervals::NAMES + ["UUID"]).freeze
+    ORDER = (%w[NULL CHAR VARCHAR BINARY VARBINARY BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE] + Temporal::NAMES + Intervals::NAMES + ["UUID"]).freeze
     INTEGER_LIMITS = {"TINYINT" => (-128..127), "SMALLINT" => (-32_768..32_767),
       "INTEGER" => (-2_147_483_648..2_147_483_647),
       "BIGINT" => (-9_223_372_036_854_775_808..9_223_372_036_854_775_807)}.freeze
@@ -23,7 +23,8 @@ module H2
         binary = (names & %w[BINARY VARBINARY]).any?
         uuid = names.include?("UUID")
         temporal = (names & Temporal::NAMES).any?
-        if temporal && ((names - %w[NULL UNKNOWN CHAR VARCHAR DATE TIME TIMESTAMP]).any? || names.sort == %w[DATE TIME])
+        if temporal && ((names - (%w[NULL UNKNOWN CHAR VARCHAR] + Temporal::NAMES)).any? ||
+            (names.include?("DATE") && names.any? { Temporal.time_type?(it) }))
           raise Error.new(90110, "SQL temporal types are not comparable")
         end
         if (binary && (names - %w[NULL UNKNOWN BINARY VARBINARY UUID]).any?) ||
@@ -55,10 +56,10 @@ module H2
       name = types.max_by { ORDER.index(it.name) || -1 }.name
       names = types.map(&:name)
       if (names & Temporal::NAMES).any?
-        if (names - %w[CHAR VARCHAR DATE TIME TIMESTAMP]).any?
+        if (names - (%w[CHAR VARCHAR] + Temporal::NAMES)).any?
           raise Error.new(22018, "Incompatible temporal SQL types")
         end
-        name = "TIMESTAMP" if names.include?("DATE") && names.include?("TIME")
+        name = Temporal.common_name(names)
       end
       if (names.include?("UUID") && (names - %w[UUID CHAR VARCHAR BINARY VARBINARY]).any?) ||
           ((names & %w[BINARY VARBINARY]).any? && (names & %w[BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE]).any?)
@@ -113,7 +114,7 @@ module H2
         BinaryString.binary?(value) ? UUIDValue.new(value) : UUIDValue.parse(value)
       when *Temporal::NAMES
         value = Temporal.convert(value, name, context: context)
-        name == "DATE" ? value : value.round(scale || (name == "TIME" ? 0 : 6))
+        name == "DATE" ? value : value.round(scale || (Temporal.time_type?(name) ? 0 : 6))
       when *Intervals::NAMES
         Intervals.convert(value, Intervals.qualifier(self)).round(self)
       when "NUMERIC"

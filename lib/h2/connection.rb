@@ -23,17 +23,28 @@ module H2
     end
 
     def prepare(sql)
+      statement, parameter_count, generation = compile(sql)
+      PreparedStatement.new(self, statement, parameter_count, sql: sql, zone_generation: generation)
+    end
+
+    def compile(sql)
       check_open
-      parser = SQL::Parser.new(sql)
+      parser = SQL::Parser.new(sql, context: @context)
       statement = parser.parse
-      PreparedStatement.new(self, statement, parser.parameter_count)
+      statement = SQL::PrepareExpressions.new(@context, parser.parameter_count).prepare(statement)
+      [statement, parser.parameter_count, @context.zone_generation]
+    end
+
+    def zone_generation
+      @context.zone_generation
     end
 
     def execute_script(sql)
       check_open
-      parser = SQL::Parser.new(sql)
-      parser.parse_script.map do |statement, parameter_count|
-        PreparedStatement.new(self, statement, parameter_count).execute
+      parser = SQL::Parser.new(sql, context: @context)
+      parser.parse_script do |statement, parameter_count|
+        compiled = SQL::PrepareExpressions.new(@context, parameter_count).prepare(statement)
+        PreparedStatement.new(self, compiled, parameter_count).execute
       end
     end
 
@@ -42,6 +53,15 @@ module H2
       @context.start_statement
       case statement
       when SQL::Transaction then transaction_command(statement)
+      when SQL::SetTimeZone
+        catalog = @database.snapshot.merge(@changes).reject { |_name, value| value.nil? }
+        evaluator = SQL::Evaluator.new(parameters, queries: SQL::Queries.new(catalog, parameters, context: @context))
+        evaluator.validate(statement.expression) if statement.expression
+        if statement.expression && evaluator.contains_subquery?(statement.expression)
+          raise Error.new(50000, "SET TIME ZONE subquery evaluation is unavailable")
+        end
+        @context.zone = statement.expression ? SQL::TimeZoneOperations.zone(evaluator.evaluate(statement.expression)) : TimeZone.default
+        Result.new(update_count: 0)
       when SQL::SetAutocommit
         commit if statement.value && !@auto_commit
         @auto_commit = statement.value
@@ -70,6 +90,7 @@ module H2
       end
     ensure
       @context.end_transaction if @auto_commit
+      @context.finish_statement
     end
 
     def transaction
@@ -182,13 +203,18 @@ module H2
   class PreparedStatement
     attr_reader :parameter_count
 
-    def initialize(connection, statement, parameter_count)
+    def initialize(connection, statement, parameter_count, sql: nil, zone_generation: nil)
       @connection = connection
       @statement = statement
       @parameter_count = parameter_count
+      @sql = sql&.dup&.freeze
+      @zone_generation = zone_generation
     end
 
     def execute(*parameters)
+      if @sql && @zone_generation != @connection.zone_generation
+        @statement, @parameter_count, @zone_generation = @connection.compile(@sql)
+      end
       if parameters.length != parameter_count
         raise Error.new(7001, "Expected #{parameter_count} parameters, got #{parameters.length}")
       end
@@ -196,7 +222,7 @@ module H2
         value = Temporal.from_ruby(value)
         case value
         when String then value.dup.freeze
-        when nil, true, false, Integer, BigDecimal, UUIDValue, DateValue, TimeValue, TimestampValue, IntervalValue then value
+        when nil, true, false, Integer, BigDecimal, UUIDValue, DateValue, TimeValue, TimestampValue, TimeTimeZoneValue, TimestampTimeZoneValue, IntervalValue then value
         when Float
           raise Error.new(22018, "Non-finite parameter") unless value.finite?
 

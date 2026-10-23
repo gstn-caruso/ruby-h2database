@@ -173,7 +173,7 @@ class SessionTemporalTest < DatabaseTest
         advance.call(Time.new(2000, 3, 1, 4, 5, 6))
         H2.connect(path: path) do |connection|
           connection.execute("INSERT INTO t DEFAULT VALUES")
-          assert_equal [["2000-02-29", "2000-02-29 01:02:03", "2000-02-29 12:00:00", "2000-02-29 12:00:00", "true"], ["2000-03-01", "2000-03-01 04:05:06", "2000-03-01 12:00:00", "2000-03-01 12:00:00", "false"]], connection.execute("TABLE t ORDER BY d").rows.map { it.map(&:to_s) }
+          assert_equal [["2000-02-29", "2000-02-29 01:02:03", "2000-02-29 12:00:00", "2000-02-28 12:00:00", "false"], ["2000-03-01", "2000-03-01 04:05:06", "2000-03-01 12:00:00", "2000-02-28 12:00:00", "false"]], connection.execute("TABLE t ORDER BY d").rows.map { it.map(&:to_s) }
         end
       end
     end
@@ -190,32 +190,32 @@ class SessionTemporalTest < DatabaseTest
     end
   end
 
-  def test_implicit_temporal_default_coercion_and_comparison_stay_dynamic
+  def test_constant_implicit_temporal_defaults_fold_but_parameter_cases_stay_dynamic
     with_clock do |advance|
       execute("CREATE TABLE implicit_clock(ts TIMESTAMP DEFAULT COALESCE(TIME '12:00:00',TIMESTAMP '1900-01-01 00:00:00'),chosen TIMESTAMP DEFAULT CASE WHEN ? THEN TIME '13:00:00' ELSE TIMESTAMP '1900-01-01 00:00:00' END,equal BOOLEAN DEFAULT TIME '12:00:00'=TIMESTAMP '2000-02-28 12:00:00',member BOOLEAN DEFAULT TIME '12:00:00' IN(TIMESTAMP '2000-02-28 12:00:00'),branch VARCHAR DEFAULT CASE TIME '12:00:00' WHEN TIMESTAMP '2000-02-28 12:00:00' THEN 'old' ELSE 'new' END)", true)
       execute("INSERT INTO implicit_clock DEFAULT VALUES")
       advance.call(Time.new(2000, 2, 29, 1, 2, 3))
       execute("INSERT INTO implicit_clock DEFAULT VALUES")
-      assert_equal [["2000-02-28 12:00:00", "2000-02-28 13:00:00", "true", "true", "old"], ["2000-02-29 12:00:00", "2000-02-29 13:00:00", "false", "false", "new"]], rows("TABLE implicit_clock ORDER BY ts").map { it.map(&:to_s) }
+      assert_equal [["2000-02-28 12:00:00", "2000-02-28 13:00:00", "true", "true", "old"], ["2000-02-28 12:00:00", "2000-02-29 13:00:00", "true", "true", "old"]], rows("TABLE implicit_clock ORDER BY ts").map { it.map(&:to_s) }
     end
   end
 
-  def test_current_function_precision_errors_and_unported_zoned_functions
+  def test_current_function_precision_errors_and_zoned_types
     assert_sql_error 42001, "SELECT CURRENT_DATE(1)"
     assert_sql_error 90151, "SELECT LOCALTIME(-1)"
     assert_sql_error 90151, "SELECT NOW(10)"
-    assert_sql_error 50100, "SELECT CURRENT_TIMESTAMP"
-    assert_sql_error 50100, "SELECT CURRENT_TIME"
+    assert_equal ["TIMESTAMP WITH TIME ZONE"], execute("SELECT CURRENT_TIMESTAMP").types.map(&:name)
+    assert_equal ["TIME WITH TIME ZONE"], execute("SELECT CURRENT_TIME").types.map(&:name)
     assert_sql_error 42122, "SELECT CURDATE"
   end
 
-  def test_validating_a_session_dependent_case_default_does_not_capture_the_clock
+  def test_constant_case_defaults_fold_before_ddl_resets_the_clock
     with_clock do |advance|
       execute("SET AUTOCOMMIT FALSE")
       execute("CREATE TABLE deferred_clock(branch VARCHAR DEFAULT CASE TIME '12:00:00' WHEN TIMESTAMP '2000-02-28 12:00:00' THEN 'old' ELSE 'new' END)")
       advance.call(Time.new(2000, 2, 29, 1, 2, 3))
       execute("INSERT INTO deferred_clock DEFAULT VALUES")
-      assert_equal [[H2::DateValue.parse("2000-02-29"), "new"]], rows("SELECT CURRENT_DATE,branch FROM deferred_clock")
+      assert_equal [[H2::DateValue.parse("2000-02-29"), "old"]], rows("SELECT CURRENT_DATE,branch FROM deferred_clock")
     end
   end
 

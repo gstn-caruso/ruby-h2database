@@ -14,7 +14,7 @@ module H2
       def type(operator, left, right)
         a, b = left.name, right.name
         if Temporal::NAMES.include?(a) && Temporal::NAMES.include?(b) && operator == "-"
-          qualifier = a == "TIME" && b == "TIME" ? "HOUR TO SECOND" : (a == "DATE" && b == "DATE" ? "DAY" : "DAY TO SECOND")
+          qualifier = Temporal.time_type?(a) && Temporal.time_type?(b) ? "HOUR TO SECOND" : (a == "DATE" && b == "DATE" ? "DAY" : "DAY TO SECOND")
           return Intervals.type(qualifier, 18, 9)
         end
         if Intervals.name?(a) && Intervals.name?(b)
@@ -32,19 +32,28 @@ module H2
         elsif (%w[+ -].include?(operator) && Temporal::NAMES.include?(a) && Intervals.name?(b)) ||
             (operator == "+" && Intervals.name?(a) && Temporal::NAMES.include?(b))
           datetime, interval = Temporal::NAMES.include?(a) ? [left, right] : [right, left]
-          if datetime.name != "TIME" || !IntervalUnits.year_month?(IntervalUnits.ordinal(Intervals.qualifier(interval)))
+          if !Temporal.time_type?(datetime.name) || !IntervalUnits.year_month?(IntervalUnits.ordinal(Intervals.qualifier(interval)))
             return datetime
           end
         end
         raise Error.new(50100, "Unsupported interval operation #{a} #{operator} #{b}")
       end
 
-      def evaluate(operator, left, right, left_type, right_type)
+      def evaluate(operator, left, right, left_type, right_type, context: nil)
         result = type(operator, left_type, right_type)
         if Temporal::NAMES.include?(left_type.name) && Temporal::NAMES.include?(right_type.name)
           a_date, a_time = DateTimeFunctions.components(left)
           b_date, b_time = DateTimeFunctions.components(right)
           absolute = (a_date.absolute_day - b_date.absolute_day) * IntervalUnits::DAY + a_time - b_time
+          if Temporal.time?(left) && Temporal.time?(right) && (Temporal.zoned?(left) || Temporal.zoned?(right))
+            left = Temporal.convert(left, "TIME WITH TIME ZONE", context: context)
+            right = Temporal.convert(right, "TIME WITH TIME ZONE", context: context)
+            absolute += (right.offset_seconds - left.offset_seconds) * Temporal::SECOND
+          elsif left.is_a?(TimestampTimeZoneValue) || right.is_a?(TimestampTimeZoneValue)
+            left = Temporal.convert(left, "TIMESTAMP WITH TIME ZONE", context: context)
+            right = Temporal.convert(right, "TIMESTAMP WITH TIME ZONE", context: context)
+            absolute += (right.offset_seconds - left.offset_seconds) * Temporal::SECOND
+          end
           return IntervalValue.from_absolute(Intervals.qualifier(result), absolute)
         end
         if Intervals.name?(left_type.name) && Intervals.name?(right_type.name)
@@ -89,25 +98,25 @@ module H2
         amount = interval.absolute * (operator == "-" ? -1 : 1)
         if interval.year_month?
           return DateTimeFunctions.add("MONTH", IntervalUnits.wrap(amount), value)
-        elsif value.is_a?(TimeValue)
+        elsif Temporal.time?(value)
           nanos = value.nanos + amount
           raise Error.new(22003, "TIME interval result is outside its day") unless (0...IntervalUnits::DAY).cover?(nanos)
 
-          return TimeValue.new(nanos)
+          return Temporal.with_components(value, DateValue.new(1970, 1, 1), nanos)
         elsif value.is_a?(DateValue)
           return value.add_days(IntervalUnits.divide(amount, IntervalUnits::DAY))
         end
         days, nanos = (value.time.nanos + amount).divmod(IntervalUnits::DAY)
-        TimestampValue.new(value.date.add_days(days), TimeValue.new(nanos))
+        Temporal.with_components(value, value.date.add_days(days), nanos)
       end
 
       def forced_difference(type, left, right, context: nil)
         qualifier = Intervals.qualifier(type)
-        if IntervalUnits.year_month?(IntervalUnits.ordinal(qualifier)) && !(left.is_a?(TimeValue) && right.is_a?(TimeValue))
+        if IntervalUnits.year_month?(IntervalUnits.ordinal(qualifier)) && !(Temporal.time?(left) && Temporal.time?(right))
           a, a_nanos = DateTimeFunctions.components(left)
           b, b_nanos = DateTimeFunctions.components(right)
-          a = Temporal.session_date(context) if left.is_a?(TimeValue)
-          b = Temporal.session_date(context) if right.is_a?(TimeValue)
+          a = Temporal.session_date(context) if Temporal.time?(left)
+          b = Temporal.session_date(context) if Temporal.time?(right)
           months = (a.year - b.year) * 12 + a.month - b.month
           comparison = [a.day, a_nanos] <=> [b.day, b_nanos]
           months -= 1 if months >= 0 && comparison.negative?
@@ -116,7 +125,7 @@ module H2
         else
           a = Temporal.type(Temporal.name(left), 9)
           b = Temporal.type(Temporal.name(right), 9)
-          value = evaluate("-", left, right, a, b)
+          value = evaluate("-", left, right, a, b, context: context)
         end
         Intervals.convert(value, qualifier).round(type)
       end

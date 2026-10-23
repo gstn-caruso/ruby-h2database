@@ -1,14 +1,28 @@
 # frozen_string_literal: true
 
+require_relative "temporal_units"
+
 module H2
   module Temporal
     SECOND = 1_000_000_000
     DAY = 86_400 * SECOND
-    NAMES = %w[DATE TIME TIMESTAMP].freeze
+    NAMES = ["DATE", "TIME", "TIME WITH TIME ZONE", "TIMESTAMP", "TIMESTAMP WITH TIME ZONE"].freeze
     module_function
 
     def value?(value)
-      value.is_a?(DateValue) || value.is_a?(TimeValue) || value.is_a?(TimestampValue)
+      value.is_a?(DateValue) || value.is_a?(TimeValue) || value.is_a?(TimestampValue) || zoned?(value)
+    end
+
+    def zoned?(value)
+      value.is_a?(TimeTimeZoneValue) || value.is_a?(TimestampTimeZoneValue)
+    end
+
+    def time?(value)
+      value.is_a?(TimeValue) || value.is_a?(TimeTimeZoneValue)
+    end
+
+    def time_type?(name)
+      name == "TIME" || name == "TIME WITH TIME ZONE"
     end
 
     def name(value)
@@ -16,6 +30,8 @@ module H2
       when DateValue then "DATE"
       when TimeValue then "TIME"
       when TimestampValue then "TIMESTAMP"
+      when TimeTimeZoneValue then "TIME WITH TIME ZONE"
+      when TimestampTimeZoneValue then "TIMESTAMP WITH TIME ZONE"
       end
     end
 
@@ -33,46 +49,175 @@ module H2
       end
     end
 
-    def parse(name, text)
-      {"DATE" => DateValue, "TIME" => TimeValue, "TIMESTAMP" => TimestampValue}.fetch(name).parse(text)
+    def parse(name, text, context: nil)
+      raise Error.new(22007, "Invalid datetime text") unless text.is_a?(String)
+      return DateValue.parse(text) if name == "DATE"
+
+      timestamp = name.start_with?("TIMESTAMP")
+      parts = timestamp ? text.split(/[ T]/, 2) : [nil, text]
+      date = DateValue.parse(parts[0]) if timestamp
+      clock = timestamp ? parts[1] : text
+      clock ||= "00:00:00"
+      zone = nil
+      if clock.end_with?("Z")
+        clock, zone = clock[0...-1], TimeZone.parse("Z")
+      elsif (index = clock.index(/[+-]/, 1))
+        identifier = clock[index..]
+        identifier = identifier.split("[", 2).first if timestamp
+        zone = TimeZone.parse(identifier)
+        clock = clock[0...index].rstrip
+      elsif (index = clock.index(" ", 1))
+        zone = TimeZone.parse(clock[index + 1..])
+        clock = clock[0...index]
+      end
+      raise Error.new(22007, "TIME requires a fixed time zone offset") if !timestamp && zone && !zone.fixed?
+
+      time = TimeValue.parse(clock)
+      if name.end_with?("WITH TIME ZONE")
+        explicit = !zone.nil?
+        zone ||= context&.zone || TimeZone.default
+        offset = if timestamp
+          zone.offset_utc(zone.epoch_local(date, time.nanos))
+        elsif explicit
+          zone.offset_utc(0)
+        else
+          context ? context.current_timestamp.offset_seconds : zone.offset_utc(Time.now.to_i)
+        end
+        return timestamp ? TimestampTimeZoneValue.new(date, time, offset) : TimeTimeZoneValue.new(time.nanos, offset)
+      end
+      if zone
+        target = context&.zone || TimeZone.default
+        if timestamp
+          epoch = zone.epoch_local(date, time.nanos)
+          local = epoch + target.offset_utc(epoch)
+          date = DateValue.from_days(local.div(86_400))
+          time = TimeValue.new(local % 86_400 * SECOND + time.nanos % SECOND)
+        else
+          offset = context ? context.current_timestamp.offset_seconds : target.offset_utc(Time.now.to_i)
+          time = TimeValue.new((time.nanos + (offset - zone.offset_utc(0)) * SECOND) % DAY)
+        end
+      end
+      timestamp ? TimestampValue.new(date, time) : time
+    rescue Error => error
+      raise if error.code == 50100
+
+      raise Error.new(22007, "Invalid #{name} #{text.inspect}")
+    rescue ArgumentError, EncodingError
+      raise Error.new(22007, "Invalid #{name} text")
     end
 
     def type(name, scale = nil)
       return Type.new("DATE", 10, 0) if name == "DATE"
 
-      scale ||= name == "TIME" ? 0 : 6
-      precision = (name == "TIME" ? 8 : 19) + (scale.zero? ? 0 : scale + 1)
+      scale ||= time_type?(name) ? 0 : 6
+      precision = (time_type?(name) ? 8 : 19) + (name.end_with?("WITH TIME ZONE") ? 6 : 0) + (scale.zero? ? 0 : scale + 1)
       Type.new(name, precision, scale)
     end
 
     def convert(value, name, context: nil)
       value = from_ruby(value)
-      return parse(name, value.strip) if value.is_a?(String) && !BinaryString.binary?(value)
+      return parse(name, value.strip, context: context) if value.is_a?(String) && !BinaryString.binary?(value)
 
       case name
       when "DATE"
         return value if value.is_a?(DateValue)
         return value.date if value.is_a?(TimestampValue)
+        return local_timestamp(value, context).date if value.is_a?(TimestampTimeZoneValue)
       when "TIME"
         return value if value.is_a?(TimeValue)
         return value.time if value.is_a?(TimestampValue)
+        if value.is_a?(TimestampTimeZoneValue)
+          offset = session(context).zone.offset_utc(value.epoch_nanos.div(SECOND))
+          return TimeValue.new((value.epoch_nanos + offset * SECOND) % DAY)
+        end
+        if value.is_a?(TimeTimeZoneValue)
+          offset = session(context).current_timestamp.offset_seconds
+          return TimeValue.new((value.nanos + (offset - value.offset_seconds) * SECOND) % DAY)
+        end
       when "TIMESTAMP"
         return value if value.is_a?(TimestampValue)
         return TimestampValue.new(value, TimeValue.new(0)) if value.is_a?(DateValue)
         return TimestampValue.new(session_date(context), value) if value.is_a?(TimeValue)
+        return local_timestamp(value, context) if value.is_a?(TimestampTimeZoneValue)
+        return TimestampValue.new(session_date(context), convert(value, "TIME", context: context)) if value.is_a?(TimeTimeZoneValue)
+      when "TIME WITH TIME ZONE"
+        return value if value.is_a?(TimeTimeZoneValue)
+        return TimeTimeZoneValue.new(value.time.nanos, value.offset_seconds) if value.is_a?(TimestampTimeZoneValue)
+        return TimeTimeZoneValue.new(value.nanos, session(context).current_timestamp.offset_seconds) if value.is_a?(TimeValue)
+        return TimeTimeZoneValue.new(value.time.nanos, session(context).zone.offset_local(value.date, value.time.nanos)) if value.is_a?(TimestampValue)
+      when "TIMESTAMP WITH TIME ZONE"
+        return value if value.is_a?(TimestampTimeZoneValue)
+        if value.is_a?(TimeTimeZoneValue)
+          return TimestampTimeZoneValue.new(session_date(context), value.time, value.offset_seconds)
+        end
+        timestamp = case value
+        when DateValue then TimestampValue.new(value, TimeValue.new(0))
+        when TimeValue then TimestampValue.new(session_date(context), value)
+        when TimestampValue then value
+        end
+        if timestamp
+          offset = session(context).zone.offset_local(timestamp.date, timestamp.time.nanos)
+          return TimestampTimeZoneValue.new(timestamp.date, timestamp.time, offset)
+        end
       end
       raise Error.new(22018, "Cannot convert #{value.class} to #{name}")
     end
 
     def session_date(context)
-      raise Error.new(50100, "Conversion requires a SQL session date context") unless context
+      session(context).current_date
+    end
 
-      context.current_date
+    def session(context)
+      raise Error.new(50100, "Conversion requires a SQL session context") unless context
+
+      context
+    end
+
+    def local_timestamp(value, context)
+      offset = session(context).zone.offset_utc(value.epoch_nanos.div(SECOND))
+      local = value.at_offset(offset)
+      TimestampValue.new(local.date, local.time)
+    rescue Error => error
+      raise unless error.code == 22007
+
+      raise Error.new(50000, "Local timestamp is outside the supported year range")
+    end
+
+    def common_name(names)
+      return "TIMESTAMP WITH TIME ZONE" if names.include?("TIMESTAMP WITH TIME ZONE") ||
+        (names.include?("TIME WITH TIME ZONE") && (names & %w[DATE TIMESTAMP]).any?)
+      return "TIMESTAMP" if names.include?("DATE") && names.include?("TIME")
+
+      (names & NAMES).max_by { NAMES.index(it) }
+    end
+
+    def with_components(value, date, nanos)
+      case value
+      when DateValue then date
+      when TimeValue then TimeValue.new(nanos)
+      when TimeTimeZoneValue then TimeTimeZoneValue.new(nanos, value.offset_seconds)
+      when TimestampTimeZoneValue then TimestampTimeZoneValue.new(date, TimeValue.new(nanos), value.offset_seconds)
+      else TimestampValue.new(date, TimeValue.new(nanos))
+      end
+    end
+
+    def offset(value, context)
+      return value.offset_seconds if zoned?(value)
+
+      date, nanos = SQL::DateTimeFunctions.components(value, context: context)
+      session(context).zone.offset_local(date, nanos)
+    end
+
+    def comparison_key(value)
+      return [name(value), value.epoch_nanos] if zoned?(value)
+      return value.values.map { comparison_key(it) } if value.is_a?(RowValue)
+
+      value
     end
 
     def compare(left, right, context: nil)
       names = [name(left), name(right)].compact
-      target = names.include?("TIMESTAMP") ? "TIMESTAMP" : names.first
+      target = common_name(names)
       convert(left, target, context: context) <=> convert(right, target, context: context)
     end
 
@@ -87,7 +232,7 @@ module H2
     def reject_zone(text)
       if (match = /(?<=\d)(?:Z|[+-]\d[\d:]*(?:\[[^\]]+\])?| [A-Za-z][\w\/+:-]*)\z/.match(text))
         TimeValue.parse(text[0...match.begin(0)].rstrip)
-        raise Error.new(50100, "Time-zone parsing requires the remaining session time-zone support")
+        raise Error.new(22007, "Time zone requires temporal parsing with a session context")
       end
     end
   end
@@ -134,10 +279,7 @@ module H2
     end
 
     def absolute_day
-      y = year - (month <= 2 ? 1 : 0)
-      era, part = y.divmod(400)
-      m = month + (month > 2 ? -3 : 9)
-      era * 146_097 + part * 365 + part / 4 - part / 100 + (153 * m + 2) / 5 + day - 1 - 719_468
+      TemporalUnits.absolute_day(year, month, day)
     end
 
     def self.from_days(days)
@@ -251,5 +393,51 @@ module H2
     def <=>(other)
       [date.packed, time.nanos] <=> [other.date.packed, other.time.nanos] if other.is_a?(TimestampValue)
     end
+  end
+
+  class TimeTimeZoneValue < Data.define(:nanos, :offset_seconds)
+    include Comparable
+
+    def initialize(nanos:, offset_seconds:)
+      TimeValue.new(nanos)
+      FixedTimeZone.new(offset_seconds)
+      super
+    end
+
+    def self.parse(text, context: nil) = Temporal.parse("TIME WITH TIME ZONE", text, context: context)
+    def time = TimeValue.new(nanos)
+    def epoch_nanos = nanos - offset_seconds * Temporal::SECOND
+    def round(scale) = self.class.new(time.round(scale).nanos, offset_seconds)
+    def at_offset(offset) = self.class.new((nanos + (offset - offset_seconds) * Temporal::SECOND) % Temporal::DAY, offset)
+    def to_s = "#{time}#{TimeZone.format(offset_seconds)}"
+    def <=>(other) = (epoch_nanos <=> other.epoch_nanos if other.is_a?(TimeTimeZoneValue))
+  end
+
+  class TimestampTimeZoneValue < Data.define(:date, :time, :offset_seconds)
+    include Comparable
+
+    def initialize(date:, time:, offset_seconds:)
+      TimestampValue.new(date, time)
+      FixedTimeZone.new(offset_seconds)
+      super
+    end
+
+    def self.parse(text, context: nil) = Temporal.parse("TIMESTAMP WITH TIME ZONE", text, context: context)
+    def epoch_nanos = date.absolute_day * Temporal::DAY + time.nanos - offset_seconds * Temporal::SECOND
+
+    def self.from_epoch(nanos, offset)
+      day, clock = (nanos + offset * Temporal::SECOND).divmod(Temporal::DAY)
+      new(DateValue.from_days(day), TimeValue.new(clock), offset)
+    end
+
+    def at_offset(offset) = self.class.from_epoch(epoch_nanos, offset)
+
+    def round(scale)
+      value = TimestampValue.new(date, time).round(scale)
+      self.class.new(value.date, value.time, offset_seconds)
+    end
+
+    def to_s = "#{date} #{time}#{TimeZone.format(offset_seconds)}"
+    def <=>(other) = (epoch_nanos <=> other.epoch_nanos if other.is_a?(TimestampTimeZoneValue))
   end
 end

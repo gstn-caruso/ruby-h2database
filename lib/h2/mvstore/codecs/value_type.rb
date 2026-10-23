@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "../../interval_units"
+require_relative "../../temporal_units"
 
 module H2
   module MVStore
@@ -57,7 +58,11 @@ module H2
               raise Error.new(5, "Incompatible interval key families")
             end
             IntervalUnits.absolute(*left.data) <=> IntervalUnits.absolute(*right.data)
-          when :blob, :clob, :time_tz, :timestamp_tz
+          when :time_tz
+            left.data[0] - left.data[1] * 1_000_000_000 <=> right.data[0] - right.data[1] * 1_000_000_000
+          when :timestamp_tz
+            TemporalUnits.timestamp_zone_nanos(left.data) <=> TemporalUnits.timestamp_zone_nanos(right.data)
+          when :blob, :clob
             raise Error.new(5, "Comparison of #{left.type} has not been ported")
           when :uuid then left.data <=> right.data
           else left.data <=> right.data

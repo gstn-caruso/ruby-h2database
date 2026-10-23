@@ -36,7 +36,8 @@ module H2
           return "ROW(#{value.fields.each_with_index.map { |field, index| "#{identifier("C#{index + 1}")} #{type(field)}" }.join(', ')})"
         end
         case value.name
-        when "TIME", "TIMESTAMP" then "#{value.name}(#{value.scale || (value.name == 'TIME' ? 0 : 6)})"
+        when *(Temporal::NAMES - ["DATE"])
+          value.name.sub(/\A(TIMESTAMP|TIME)/) { "#{it}(#{value.scale || (Temporal.time_type?(value.name) ? 0 : 6)})" }
         when "NUMERIC" then "NUMERIC(#{value.precision || 100_000},#{value.scale || 0})"
         when "VARCHAR", "CHAR", "BINARY", "VARBINARY" then value.precision ? "#{value.name}(#{value.precision})" : value.name
         else value.name
@@ -56,7 +57,7 @@ module H2
           end
         when UUIDValue then "UUID '#{value}'"
         when IntervalValue then value.to_s
-        when DateValue, TimeValue, TimestampValue then "#{Temporal.name(value)} '#{value}'"
+        when DateValue, TimeValue, TimestampValue, TimeTimeZoneValue, TimestampTimeZoneValue then "#{Temporal.name(value)} '#{value}'"
         when BigDecimal then value.to_s("F")
         when Integer then value.to_s
         when Float
@@ -71,7 +72,9 @@ module H2
       def expression(node, parameters: [], ctes: [])
         render = ->(child) { expression(child, parameters: parameters, ctes: ctes) }
         case node
+        when SQL::TypedLiteral then expression(node.cast ? SQL::Cast.new(SQL::Literal.new(node.value), node.type) : SQL::Literal.new(node.value), parameters: parameters, ctes: ctes)
         when SQL::CurrentDateTime then node.name + (node.scale.nil? ? "" : "(#{node.scale})")
+        when SQL::TimeZoneExpression then "(#{render.call(node.expression)} AT #{node.zone ? "TIME ZONE #{render.call(node.zone)}" : 'LOCAL'})"
         when SQL::CapturedExpression then expression(node.expression, parameters: node.parameters, ctes: ctes)
         when SQL::Literal then literal(node.value)
         when SQL::Parameter then literal(parameters.fetch(node.index))

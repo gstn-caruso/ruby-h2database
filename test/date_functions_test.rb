@@ -45,7 +45,8 @@ class DateFunctionsTest < DatabaseTest
     assert_sql_error 90008, "SELECT DATEADD('bad',NULL,NULL)"
     assert_sql_error 42001, "SELECT DATEADD(?,1,DATE '2000-01-01')", "DAY"
     assert_sql_error 90008, "SELECT DATEADD(day,1,TIME '12:00:00') WHERE FALSE"
-    assert_sql_error 50100, "SELECT DATEDIFF(timezone_hour,DATE '2000-01-01',DATE '2000-01-02')"
+    execute("SET TIME ZONE '+03'")
+    assert_equal [[0]], rows("SELECT DATEDIFF(timezone_hour,DATE '2000-01-01',DATE '2000-01-02')")
   end
 
   def test_parameters_and_dynamic_saved_defaults_preserve_function_fields

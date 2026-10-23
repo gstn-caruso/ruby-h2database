@@ -6,7 +6,8 @@ require_relative "support/upstream_script"
 class UpstreamTest < DatabaseTest
   ROOT = File.expand_path("../h2/src/test/org/h2/test/scripts", __dir__)
   COMPLETE_SCRIPTS = %w[datatypes/int.sql datatypes/uuid.sql functions/string/upper.sql functions/string/lower.sql
-    functions/system/coalesce.sql functions/numeric/mod.sql functions/system/nullif.sql].freeze
+    functions/system/coalesce.sql functions/numeric/mod.sql functions/system/nullif.sql
+    functions/timeanddate/dateadd.sql functions/timeanddate/datediff.sql].freeze
 
   COMPLETE_SCRIPTS.each do |path|
     define_method("test_complete_#{path.tr('/.', '__')}") do
@@ -77,14 +78,24 @@ class UpstreamTest < DatabaseTest
     [*(0..2), *(6..39)].each { check_case(script.cases.fetch(it)) }
   end
 
-  def test_original_dateadd_statements_except_zoned_values
-    script = UpstreamScript.new(File.join(ROOT, "functions/timeanddate/dateadd.sql"))
-    [*(0..9), 13, 15, *(19..28), 30, 36, *(39..42)].each { check_case(script.cases.fetch(it)) }
+  def test_original_time_zone_statements_except_metadata_and_alter_table
+    script = UpstreamScript.new(File.join(ROOT, "datatypes/time-with-time-zone.sql"))
+    [*(0..2), *(7..25)].each { check_case(script.cases.fetch(it)) }
   end
 
-  def test_original_datediff_statements_except_zoned_values
-    script = UpstreamScript.new(File.join(ROOT, "functions/timeanddate/datediff.sql"))
-    [*(0..37), *(46..59)].each { check_case(script.cases.fetch(it)) }
+  def test_original_timestamp_zone_statements_except_metadata_and_alter_table
+    script = UpstreamScript.new(File.join(ROOT, "datatypes/timestamp-with-time-zone.sql"))
+    [*(0..7), *(10..31)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_current_time_except_string_functions_and_plans
+    script = UpstreamScript.new(File.join(ROOT, "functions/timeanddate/current-time.sql"))
+    [*(0..4), *(7..9)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_current_timestamp_before_java_aliases_identity_and_modes
+    script = UpstreamScript.new(File.join(ROOT, "functions/timeanddate/current_timestamp.sql"))
+    script.cases.first(8).each { check_case(it) }
   end
 
   def test_original_date_trunc_statements_except_zones_directives_and_modes

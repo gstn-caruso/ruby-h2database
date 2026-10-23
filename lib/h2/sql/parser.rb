@@ -16,8 +16,9 @@ module H2
 
       attr_reader :parameter_count
 
-      def initialize(sql)
+      def initialize(sql, context: nil)
         @tokens = Lexer.new(sql).tokens
+        @context = context
         @position = 0
         @parameter_count = 0
       end
@@ -37,7 +38,8 @@ module H2
           start = @parameter_count
           statement = parse_statement
           syntax("semicolon") unless current.kind == :eof || accept(";")
-          statements << [statement, @parameter_count - start]
+          entry = [statement, @parameter_count - start]
+          statements << (block_given? ? yield(*entry) : entry)
         end
         statements
       end
@@ -143,6 +145,10 @@ module H2
           end
         when "SAVEPOINT" then Transaction.new(:savepoint, identifier)
         when "SET"
+          if accept("TIME")
+            expect("ZONE")
+            return SetTimeZone.new(accept("LOCAL") ? nil : expression)
+          end
           unsupported unless accept("AUTOCOMMIT")
           if accept("TRUE")
             SetAutocommit.new(true)
@@ -309,7 +315,7 @@ module H2
           raise Error.new(90008, "Fractional seconds scale cannot be negative") if scale.negative?
           raise Error.new(90151, "Fractional seconds scale must be 0 through 9") if scale > 9
         end
-        temporal_zone_suffix if name != "DATE"
+        name += temporal_zone_suffix if name != "DATE"
         Temporal.type(name, scale)
       end
 
@@ -320,8 +326,9 @@ module H2
         elsif accept("WITH")
           expect("TIME")
           expect("ZONE")
-          raise Error.new(50100, "Time-zone types have not yet been ported")
+          return " WITH TIME ZONE"
         end
+        ""
       end
 
       def insert
@@ -657,6 +664,16 @@ module H2
             left = negate ? Unary.new("NOT", node) : node
           elsif accept("::")
             left = Cast.new(left, parse_type)
+          elsif keyword?("AT") && (@tokens[@position + 1]&.value == "LOCAL" ||
+              (@tokens[@position + 1]&.value == "TIME" && @tokens[@position + 2]&.value == "ZONE"))
+            take
+            if accept("LOCAL")
+              left = TimeZoneExpression.new(left, nil)
+            else
+              expect("TIME")
+              expect("ZONE")
+              left = TimeZoneExpression.new(left, expression)
+            end
           elsif interval_qualifier?
             left = Cast.new(left, interval_type.first)
           else
@@ -690,9 +707,6 @@ module H2
         when "FALSE" then Literal.new(false)
         when "CURRENT_DATE", "LOCALTIME", "LOCALTIMESTAMP", "CURDATE", "CURTIME", "NOW", "CURRENT_TIME", "CURRENT_TIMESTAMP"
           return column_or_function(token) if %w[CURDATE CURTIME NOW].include?(token.value) && !keyword?("(")
-          if %w[CURRENT_TIME CURRENT_TIMESTAMP].include?(token.value)
-            raise Error.new(50100, "Zoned current-clock functions have not yet been ported")
-          end
           current_datetime(token.value)
         when "INTERVAL"
           negative = accept("-")
@@ -710,10 +724,10 @@ module H2
           explicit ? Cast.new(Literal.new(value), type) : Literal.new(value)
         when "DATE", "TIME", "TIMESTAMP"
           if current.kind == :literal || keyword?("WITH") || keyword?("WITHOUT")
-            temporal_zone_suffix unless token.value == "DATE"
+            name = token.value + (token.value == "DATE" ? "" : temporal_zone_suffix)
             text = take
             syntax("datetime literal") unless text.kind == :literal && text.value.is_a?(String)
-            Literal.new(Temporal.parse(token.value, text.value))
+            Literal.new(Temporal.parse(name, text.value, context: @context))
           else
             column_or_function(token)
           end
