@@ -249,6 +249,7 @@ module H2
 
       def base_type
         name = take.value
+        return enum_type if name == "ENUM"
         if name == "NUMBER"
           return Type.new("DECFLOAT", 40, 0) unless current.value == "("
 
@@ -329,6 +330,27 @@ module H2
         end
         Type.new(name: "NUMERIC", precision: precision, scale: scale, declared_scale: declared_scale,
           declared_name: declared_name, declared_precision: declared_precision)
+      end
+
+      def enum_type
+        raise Error.new(42001, "ENUM labels are required") unless accept("(")
+
+        labels = []
+        loop do
+          begin
+            node = expression
+            parameters = Array.new(parameter_count, UNBOUND_PARAMETER)
+            evaluator = Evaluator.new(parameters, queries: Queries.new({}, parameters, context: @context))
+            value = evaluator.evaluate(node)
+            labels << Type.new("VARCHAR", nil, nil).convert(value, source_type: evaluator.type_of(node), context: @context)
+          rescue Error
+            raise Error.new(42001, "Expected ENUM label")
+          end
+          break unless accept(",")
+        end
+        raise Error.new(42001, "Expected ENUM closing parenthesis") unless accept(")")
+
+        EnumType.new(labels)
       end
 
       def numeric_type_integer(name)

@@ -79,7 +79,7 @@ module H2
             aggregate_order(node)
           end
           argument_type = type_of(node.arguments.first)
-          if %w[SUM AVG].include?(node.name) && (argument_type.is_a?(ArrayType) || (%w[BINARY VARBINARY UUID JSON] + Temporal::NAMES).include?(argument_type&.name))
+          if %w[SUM AVG].include?(node.name) && (argument_type.is_a?(ArrayType) || (%w[ENUM BINARY VARBINARY UUID JSON] + Temporal::NAMES).include?(argument_type&.name))
             raise Error.new(90015, "Invalid type for #{node.name}")
           end
           function_type(node) if datetime_function?(node)
@@ -228,6 +228,10 @@ module H2
         when Unary
           value = evaluate(node.operand, row, group)
           return nil if value.nil?
+          if value.is_a?(EnumValue)
+            return value if node.operator == "+"
+            return -value.ordinal if node.operator == "-"
+          end
 
           case node.operator
           when "NOT" then !boolean(value)
@@ -341,6 +345,10 @@ module H2
           type = Type.common([type_of(Literal.new(left)), type_of(Literal.new(right))])
           left, right = [left, right].map { type.coerce(it, context: context) }
           return compare(left, right)
+        end
+        if left.is_a?(EnumValue) || right.is_a?(EnumValue)
+          type = left.is_a?(EnumValue) ? left.type : right.type
+          return type.convert(left, context: context).ordinal <=> type.convert(right, context: context).ordinal
         end
         if left.is_a?(JsonValue) || right.is_a?(JsonValue)
           return JsonValue.convert(left).bytes <=> JsonValue.convert(right).bytes
@@ -472,6 +480,7 @@ module H2
           when UUIDValue then Type.new("UUID", nil, nil)
           when JsonValue then Type.new("JSON", JsonValue::MAX_PRECISION, 0)
           when DecfloatValue then Type.new("DECFLOAT", node.value.precision, 0)
+          when EnumValue then node.value.type
           when DateValue then Temporal.type("DATE")
           when TimeValue then Temporal.type("TIME", 9)
           when TimestampValue then Temporal.type("TIMESTAMP", 9)
@@ -482,7 +491,11 @@ module H2
           when RowValue then RowType.new(node.value.values.map { type_of(Literal.new(it)) })
           when ArrayValue then ArrayType.new(node.value.element_type, node.value.values.length)
           end
-        when Unary then node.operator == "NOT" ? Type.new("BOOLEAN", nil, nil) : type_of(node.operand)
+        when Unary
+          return Type.new("BOOLEAN", nil, nil) if node.operator == "NOT"
+
+          type = type_of(node.operand)
+          node.operator == "-" && type.name == "ENUM" ? Type.new("INTEGER", 32, 0) : type
         when Predicate then Type.new("BOOLEAN", nil, nil)
         when Function, Aggregate then function_type(node)
         when Binary
@@ -499,11 +512,15 @@ module H2
           end
 
           types = [type_of(node.left), type_of(node.right)]
+          if types.any? { it.name == "ENUM" } && types.any? { it.is_a?(RowType) }
+            raise Error.new(22018, "ENUM arithmetic cannot use ROW operands")
+          end
           return Type.common(types) if types.any? { it.is_a?(ArrayType) }
           return IntervalOperations.type(node.operator, *types) if IntervalOperations.applicable?(node.operator, *types)
           return TemporalOperations.type(node.operator, *types) if types.any? { Temporal::NAMES.include?(it&.name) }
 
           type = Type.common(types)
+          return Type.new("INTEGER", 32, 0) if type.name == "ENUM"
           return FloatingOperations.type(type) if FloatingOperations::NAMES.include?(type.name)
           if node.operator == "%" && type.name == "DECFLOAT"
             return types.last if (%w[NUMERIC REAL DOUBLE DECFLOAT] + Type::INTEGER_LIMITS.keys).include?(types.last.name)
@@ -1014,6 +1031,7 @@ module H2
       end
 
       def numeric(value)
+        return value.ordinal if value.is_a?(EnumValue)
         if BinaryString.binary?(value) || value.is_a?(UUIDValue) || Temporal.value?(value)
           raise Error.new(50100, "Numeric operation on binary or UUID values")
         end
@@ -1055,6 +1073,9 @@ module H2
         if %w[+ - * /].include?(node.operator)
           sources = [type_of(node.left), type_of(node.right)]
           result_type = type_of(node)
+          if sources.any? { it.name == "ENUM" }
+            return NumericOperations.ordinal_arithmetic(node.operator, ->(index) { index.zero? ? left : evaluate(node.right, row, group) })
+          end
           if FloatingOperations::NAMES.include?(result_type.name)
             return FloatingOperations.evaluate(node.operator, result_type, sources,
               ->(index) { index.zero? ? left : evaluate(node.right, row, group) })
@@ -1273,12 +1294,14 @@ module H2
           length = BinaryString.encode(first, source_type: type_of(node.arguments.first)).bytesize
           node.name == "BIT_LENGTH" ? length * 8 : length
         when "ABS"
+          return first if first.is_a?(EnumValue)
           return first.abs if first.is_a?(DecfloatValue)
 
           return type_of(node).convert(first.abs) if first.is_a?(Float)
 
           first.is_a?(IntervalValue) ? (first.negative ? first.negate : first) : check_integer(numeric(first).abs, node)
         when "SIGN"
+          return first.ordinal <=> 0 if first.is_a?(EnumValue)
           return first.signum if first.is_a?(DecfloatValue)
           return first.absolute <=> 0 if first.is_a?(IntervalValue)
           raise Error.new(50100, "SIGN is unavailable for this value type") unless first.is_a?(Numeric)

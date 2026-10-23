@@ -32,6 +32,10 @@ module H2
       a, b = left, right
       a = a.fields.first while a.is_a?(RowType) && a.fields.length == 1
       b = b.fields.first while b.is_a?(RowType) && b.fields.length == 1
+      if [a,b].all? && ![a,b].any? { it.is_a?(RowType) } && [a,b].any? { it.name == "ENUM" } &&
+          ([a,b].map(&:name) - %w[ENUM CHAR VARCHAR NULL UNKNOWN]).any?
+        raise Error.new(90110, "SQL ENUM types are not comparable")
+      end
       if a.is_a?(ArrayType) || b.is_a?(ArrayType)
         if a.is_a?(ArrayType) && b.is_a?(ArrayType)
           check_comparable(a.element_type, b.element_type)
@@ -88,6 +92,7 @@ module H2
         return RowType.new(Array.new(types.first.fields.length) { |index| common(types.map { it.fields[index] }) })
       end
       return types.reduce { ArrayType.common(_1, _2) } if types.any? { it.is_a?(ArrayType) }
+      return EnumType.common(types) if types.any? { it.name == "ENUM" }
       return Intervals.common(types) if types.any? { Intervals.name?(it.name) }
 
       name = types.max_by { ORDER.index(it.name) || -1 }.name
@@ -237,6 +242,7 @@ module H2
     end
 
     def numeric_input(value)
+      return value.ordinal if value.is_a?(EnumValue)
       return value.to_d if value.is_a?(DecfloatValue)
       return value.to_d if value.is_a?(IntervalValue)
       if BinaryString.binary?(value) || value.is_a?(UUIDValue)
@@ -249,6 +255,7 @@ module H2
     end
 
     def integer(value)
+      value = value.ordinal if value.is_a?(EnumValue)
       if value.is_a?(DecfloatValue) && !value.finite?
         raise Error.new(22018, "Cannot convert non-finite DECFLOAT to integer")
       end
@@ -283,6 +290,7 @@ module H2
     end
 
     def boolean(value)
+      raise Error.new(22018, "Cannot convert ENUM to BOOLEAN") if value.is_a?(EnumValue)
       value = value.to_d if value.is_a?(DecfloatValue)
       raise Error.new(22018, "Cannot convert INTERVAL to BOOLEAN") if value.is_a?(IntervalValue)
       if BinaryString.binary?(value) || value.is_a?(UUIDValue)

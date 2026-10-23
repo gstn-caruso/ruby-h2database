@@ -11,7 +11,7 @@ module H2
       def initialize(sql)
         raise ArgumentError, "SQL must be a String" unless sql.is_a?(String)
 
-        @scanner = StringScanner.new(sql)
+        @scanner = StringScanner.new(source_text(sql))
       end
 
       def tokens
@@ -32,6 +32,58 @@ module H2
       end
 
       private
+
+      def source_text(sql)
+        return sql unless [Encoding::UTF_16BE, Encoding::UTF_16LE].include?(sql.encoding)
+        return sql.encode(Encoding::UTF_8) if sql.valid_encoding?
+
+        units = CharacterString.sort_key(sql).unpack('n*')
+        result = +''
+        index = 0
+        while index < units.length
+          unit = units[index]
+          if [34,39].include?(unit)
+            quote = unit.chr
+            body = []
+            closed = false
+            index += 1
+            while index < units.length
+              current = units[index]
+              index += 1
+              if current == unit
+                unless units[index] == unit
+                  closed = true
+                  break
+                end
+                index += 1
+              end
+              body << current
+            end
+            raise Error.new(42000, "Unterminated quoted SQL text") unless closed
+            text = body.pack('n*').force_encoding(Encoding::UTF_16BE)
+            if text.valid_encoding?
+              result << quote << text.encode(Encoding::UTF_8).gsub(quote, quote * 2) << quote
+            else
+              encoded = body.map do |point|
+                if point == unit then quote * 2
+                elsif point == 92 then '\\\\'
+                elsif (32..126).cover?(point) then point.chr
+                else "\\#{point.to_s(16).rjust(4,'0')}"
+                end
+              end.join
+              result << "U&#{quote}#{encoded}#{quote}"
+            end
+          else
+            length = (0xd800..0xdbff).cover?(unit) && (0xdc00..0xdfff).cover?(units[index + 1].to_i) ? 2 : 1
+            text = units[index,length].pack('n*').force_encoding(Encoding::UTF_16BE)
+            raise Error.new(42000, "Invalid SQL source encoding") unless text.valid_encoding?
+
+            result << text.encode(Encoding::UTF_8)
+            index += length
+          end
+        end
+        result
+      end
 
       def comment
         depth = 1

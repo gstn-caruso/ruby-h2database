@@ -16,7 +16,9 @@ module H2
         if Intervals.name?(type.name)
           return MVStore::Value.new(:interval, [value.ordinal, value.negative, value.leading, value.remaining])
         end
-        data = if type.name == "NUMERIC"
+        data = if type.name == "ENUM"
+          value.ordinal
+        elsif type.name == "NUMERIC"
           scale = type.scale || 0
           MVStore::Decimal.new((value * (10**scale)).to_i, scale)
         elsif type.name == "DECFLOAT"
@@ -40,18 +42,18 @@ module H2
         MVStore::Value.new(kind, data)
       end
 
-      def decode(value, type)
+      def decode(value, type, context: nil)
         return nil if value.type == :null
         if type.is_a?(ArrayType)
           raise Error.new(90030, "Stored value is not an array") unless value.type == :array
 
-          return type.convert(ArrayValue.new(value.data.map { decode(it, type.element_type) }, type.element_type))
+          return type.convert(ArrayValue.new(value.data.map { decode(it, type.element_type, context: context) }, type.element_type), context: context)
         end
         if type.is_a?(RowType)
           unless value.type == :row && value.data.length == type.fields.length
             raise Error.new(90030, "Stored row does not match its column type")
           end
-          return RowValue.new(type.fields.each_with_index.map { |field, index| decode(value.data[index], field) })
+          return RowValue.new(type.fields.each_with_index.map { |field, index| decode(value.data[index], field, context: context) })
         end
         data = case value.type
         when :date then DateValue.from_packed(value.data)
@@ -65,7 +67,7 @@ module H2
           value.data.is_a?(MVStore::Decimal) ? DecfloatValue.new(value.data.unscaled, value.data.scale, nil) : DecfloatValue.new(0, 0, value.data)
         else value.to_ruby
         end
-        type.convert(data)
+        type.convert(data, context: context)
       end
     end
   end

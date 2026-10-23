@@ -286,6 +286,7 @@ module H2
           when false then "FALSE"
           when String then BinaryString.binary?(node.value) ? "X'#{node.value.unpack1('H*')}'" : CharacterString.sql(node.value)
           when UUIDValue then "UUID '#{node.value}'"
+          when EnumValue then CharacterString.sql(node.value.label)
           when JsonValue then node.value.sql
           when DecfloatValue then node.value.special ? "'#{node.value}'" : node.value.to_s
           when IntervalValue then node.value.to_s

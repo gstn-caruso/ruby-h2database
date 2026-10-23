@@ -212,6 +212,11 @@ class UpstreamTest < DatabaseTest
     end
   end
 
+  def test_original_enum_values_except_alter_domains_views_and_metadata
+    script = UpstreamScript.new(File.join(ROOT,'datatypes/enum.sql'))
+    [0,1,3,7,15,19,22,57,58,73,74,75,77,78,79,80].each { check_case(script.cases.fetch(it)) }
+  end
+
   def test_original_round_except_call_and_information_schema
     script = UpstreamScript.new(File.join(ROOT,"functions/numeric/round.sql"))
     [*(0..2),5,6,*(16..18),*(20..28)].each { check_case(script.cases.fetch(it)) }

@@ -213,6 +213,24 @@ end
 
 The six aggregates `BIT_AND_AGG`, `BIT_OR_AGG`, `BIT_XOR_AGG`, `BIT_NAND_AGG`, `BIT_NOR_AGG` and `BIT_XNOR_AGG` support DISTINCT and FILTER, skip SQL NULL and return NULL for empty groups. Inverse forms negate the final aggregate. Functions, aggregate defaults and captured parameters retain widths and fixed binary operands across native/JDBC reopen and CLI invocations. Window aggregates and general EXPLAIN plans remain pending.
 
+## Enumerated values
+
+`ENUM('low','medium','high')` stores an ordered set of labels. Assignment matches labels after trimming ASCII control/space characters at both ends and converting to uppercase; results retain the spelling in the declaration. Ordering, MIN/MAX, keys, grouping and DISTINCT use the ordinal. Empty and duplicate normalized labels raise 22032 and 22033; a missing label or ordinal raises 22030.
+
+```ruby
+H2.connect do |connection|
+  connection.execute("CREATE TABLE tasks(priority ENUM('low','medium','high'))")
+  connection.execute("INSERT INTO tasks VALUES(?)", " HIGH ")
+  value = connection.execute("TABLE tasks").rows.first.first
+  p [value.label, value.ordinal] # => ["high", 3]
+  p value.type.labels          # => ["low", "medium", "high"]
+end
+```
+
+Results use immutable `H2::EnumValue` objects. For typed parameters, create a descriptor with `H2::EnumType.new(['low','high'])`, then call `type.value('high')`. Explicit numeric casts use the ordinal; character and JSON casts use the label. Arithmetic produces INTEGER results. Compare directly with labels or other ENUM values; comparisons with numbers require an explicit cast. SUM/AVG reject ENUM arguments.
+
+Ordinals start at one by default. `H2.connect(zero_based_enums: true)` and CLI `--zero-based-enums` start them at zero, matching H2's `ZERO_BASED_ENUMS` setting. This choice is not stored in the file: supply the same option when reopening. For zero-based typed parameters, use `type.value('high', zero_based: true)`. ENUM columns, arrays, keys, CTAS and dynamic defaults survive native/JDBC cross-reading and cross-writing. Precision counts UTF-16 units, including preserved isolated surrogates. Domains, ALTER TYPE, views and complete composite metadata remain migration work.
+
 ## Rounding numbers and truncating dates
 
 `ROUND(value[, scale])` rounds decimal ties away from zero. `TRUNC` / `TRUNCATE` discard the fractional part toward zero; `FLOOR` rounds down and `CEIL` / `CEILING` round up. A negative scale selects digits before the decimal point. Scales range from -100,000 to 100,000; invalid scales raise 90008, and integer overflow raises 22003.
@@ -386,7 +404,7 @@ bundle exec h2 example.sql
 cat example.sql | bundle exec h2
 ```
 
-An invocation uses a fresh in-memory database unless `--database PATH` is supplied. File options include `--read-only`, `--user NAME` and `--password PASSWORD`. Query results use tab-separated columns with escaped control characters; binary columns print hexadecimal `X'...'` literals, and SQL errors exit with status 1. `connection.execute(sql)` accepts one statement; `execute_script(sql)` returns a result for each statement in a script. Script execution is sequential and does not add an implicit transaction.
+An invocation uses a fresh in-memory database unless `--database PATH` is supplied. File options include `--read-only`, `--user NAME` and `--password PASSWORD`; `--zero-based-enums` selects ordinals starting at zero for memory or file databases. Query results use tab-separated columns with escaped control characters; binary columns print hexadecimal `X'...'` literals, and SQL errors exit with status 1. `connection.execute(sql)` accepts one statement; `execute_script(sql)` returns a result for each statement in a script. Script execution is sequential and does not add an implicit transaction.
 
 ## Compare against the Java reference
 

@@ -38,7 +38,7 @@ module H2
     end
 
     class Value < Data.define(:type, :data)
-      INTEGERS = {tinyint: 8, smallint: 16, integer: 32, bigint: 64, date: 64, time: 64}.freeze
+      INTEGERS = {tinyint: 8, smallint: 16, integer: 32, bigint: 64, enum: 32, date: 64, time: 64}.freeze
       STRINGS = [:varchar, :char, :varchar_ignorecase].freeze
       BINARY = [:varbinary, :binary, :java_object, :geometry, :json, :uuid].freeze
       TYPES = (INTEGERS.keys + STRINGS + BINARY + [:null, :boolean, :numeric, :decfloat, :real, :double,
