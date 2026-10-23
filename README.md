@@ -2,7 +2,7 @@
 
 A native Ruby migration of the [H2 SQL database](https://h2database.com), targeting Ruby 3.4 and 4.0. The Ruby engine runs in-process without Java or another database engine.
 
-**The migration is in progress.** The current Ruby implementation provides an initial SQL engine in memory and a separate, file-backed MVStore API. MVStore reads and writes H2 format 3 maps, including initial SQL value, row, index and versioned-value codecs. The SQL executor is not yet connected to this storage, and the port does not replace the complete Java engine. See [MIGRATION.md](MIGRATION.md) for the remaining scope and compatibility evidence.
+**The migration is in progress.** The Ruby SQL engine runs in memory or in native H2 format 3 `.mv.db` files for the implemented schema/type subset. File-backed SQL uses the native MVStore transaction layer, and the low-level map API is also available separately. The port does not replace the complete Java engine. See [MIGRATION.md](MIGRATION.md) for the supported behavior, remaining scope and compatibility evidence.
 
 ## Install and test
 
@@ -29,7 +29,7 @@ H2.connect do |connection|
 end
 ```
 
-`H2.connect` creates an isolated in-memory database. Use `H2::Database.new` and call `database.connect` for multiple connections sharing a database. Block forms close their connection automatically. Closing the last connection does not discard an explicitly retained `Database` object.
+`H2.connect` creates an isolated in-memory database by default. Use `H2::Database.new` and call `database.connect` for multiple connections sharing a database. Block forms close their connection automatically. Closing the last connection does not discard an explicitly retained `Database` object; call `database.close` when finished. Closing a database invalidates its connections.
 
 Parameters are positional values supplied after SQL. `prepare(sql)` returns a reusable statement with `execute(*values)` and `parameter_count`. Strings are copied before use, and results expose frozen columns, row arrays and string values. `rows` preserves duplicate column labels; enumeration produces hashes, where the last value for a repeated label wins.
 
@@ -38,6 +38,27 @@ Queries can combine tables with inner, left, right, cross, natural and `USING` j
 Scalar and correlated subqueries work in expressions, `EXISTS`, `IN`/`NOT IN`, inserts, updates and deletes. An empty single-column scalar query returns `nil`; multiple rows raise H2 error 90053. A multi-column scalar query returns an immutable `H2::RowValue`, whose fields are available through `.values`; an empty multi-column query returns a row of `nil` fields. `ROW(...)` constructors, row comparisons and searched/simple `CASE` expressions are also available.
 
 Query preparation validates reachable expressions and inner scopes before scanning rows. As in H2, derived tables, range arguments and pagination expressions cannot refer to an outer query. Defaults containing subqueries read the current data when used and retain any parameters supplied when the table was created.
+
+## Persistent SQL databases
+
+Create a new database and reopen it in a later connection or process:
+
+```ruby
+H2.connect(path: "people") do |connection|
+  connection.execute("CREATE TABLE people(id INT PRIMARY KEY, name VARCHAR(100))")
+  connection.execute("INSERT INTO people VALUES (?, ?)", 1, "Ada")
+end
+
+H2.connect(path: "people", read_only: true) do |connection|
+  p connection.execute("TABLE people").rows # => [[1, "Ada"]]
+end
+```
+
+`path:` accepts a database base path or a filename ending in `.mv.db`; the example creates `people.mv.db`. File access currently requires 64-bit Linux as described below. An owned connection from `H2.connect(path: ...)` closes its database and releases the file lock on close. For shared connections, use `H2::Database.new(path: ...)` or the block form `H2::Database.open(path) { |database| ... }`, then call `database.connect`. Independent writable database objects for the same file conflict, including opens from Java.
+
+Options include `read_only: true`, `compression: :none/:fast/:high`, and `user:`/`password:` (defaults `sa`/empty). A new file creates that administrator using H2's salted password format; existing files authenticate against their saved user records. SQL file access currently requires an administrator. Full users/roles/permissions, authentication integrations and encryption remain to port.
+
+The catalog, column declarations, defaults, keys, physical indexes and rows use H2's own format. Successful SQL commits synchronize one native transaction containing all changed tables/indexes and catalog records. Integer primary-key row ids and generated row ids are retained across updates. Native SQL can reopen tested Java-created files, and JDBC can reopen tested Ruby-created files. Unsupported catalog statements, schemas, settings and types fail explicitly; this is not general compatibility with every H2 database. Tables currently load into memory, queries scan them, and dirty MVStore maps are rewritten. SQL transaction conflicts still use table versions rather than the storage API's per-key locks.
 
 ## Transactions
 
@@ -52,7 +73,7 @@ end
 
 Transaction blocks commit on normal completion and roll back on exceptions or nonlocal exits. Nested blocks restore a savepoint on failure. SQL `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `ROLLBACK TO SAVEPOINT` and `SET AUTOCOMMIT` are also available.
 
-As in H2, the implemented DDL commands commit pending changes. The SQL executor currently detects conflicts at table granularity. Its integration with the separate MVStore transaction API, full MVCC and the remaining isolation levels are still pending.
+As in H2, the implemented DDL commands commit pending changes. File-backed SQL commits use native MVStore undo logs and durable decisions; closing a connection discards its pending SQL changes. A commit interrupted after its durable decision can recover as committed. The SQL executor still detects conflicts at table granularity. Full row-level SQL MVCC, statement snapshots, remaining isolation levels and SQL prepared-transaction commands are pending.
 
 ## MVStore files
 
@@ -82,11 +103,11 @@ end
 
 `Value#type` preserves SQL type identity, `#data` exposes its immutable storage representation, and `#to_ruby` converts initial scalars and nested collections. `Decimal` retains both the unscaled integer and scale. Temporal values currently expose H2's packed date/nanosecond/offset fields; LOB references retain identifiers and lengths without fetching external content. These codecs do not add their types to the SQL parser or expression evaluator.
 
-Existing `table.<object_id>` and `index.<object_id>` maps can be opened with inferred registered codecs. Table entries contain `VersionedValue` objects with `current`, `committed`, `operation_id` and `entry_id`; current row fields are in `SearchRow#values`. This is low-level access: callers editing these maps must maintain table/index consistency. `H2.connect` still creates an in-memory SQL database.
+Existing `table.<object_id>` and `index.<object_id>` maps can be opened with inferred registered codecs. Table entries contain `VersionedValue` objects with `current`, `committed`, `operation_id` and `entry_id`; current row fields are in `SearchRow#values`. This is low-level access: callers editing these maps must maintain table/index consistency. The SQL API maintains the supported table/index/catalog relationships itself.
 
 `commit` appends a chunk and synchronizes it before publishing the duplicated file headers. `rollback` restores the last commit; handles for maps created after that commit become invalid. Closing a writable store commits pending changes, including the block form. Compression options are `:none`, `:fast` (LZF) and `:high` (DEFLATE). Read-only opens share a lock; a writable open excludes other readers and writers, including Java processes. File locking currently requires 64-bit Linux on x86_64 or aarch64; local and CI verification use x86_64.
 
-`H2::MVStore::Error#code` exposes MVStore error numbers, separately from SQL errors: 2 for write failures/read-only mutation, 4 for closed handles, 5 for unsupported formats or codecs, 6 for corruption, and 7 for conflicting locks. SQL database lifecycle, remaining transaction-store behavior, collations, encryption, external LOB content and compaction remain pending. Some typed-key comparisons, including non-ASCII case-insensitive strings and zoned temporal/interval keys, explicitly fail as unsupported. Opened maps currently materialize sorted entries and use binary search; each changed map is rewritten on commit.
+`H2::MVStore::Error#code` exposes MVStore error numbers, separately from SQL errors: 2 for write failures/read-only mutation, 4 for closed handles, 5 for unsupported formats or codecs, 6 for corruption, and 7 for conflicting locks. Remaining SQL lifecycle/transaction behavior, collations, encryption, external LOB content and compaction remain pending. Some typed-key comparisons, including non-ASCII case-insensitive strings and zoned temporal/interval keys, explicitly fail as unsupported. Opened maps currently materialize sorted entries and use binary search; each changed map is rewritten on commit.
 
 ## MVStore transactions
 
@@ -110,7 +131,7 @@ Transaction maps support enumeration, `put` (returns the old value), `put_if_abs
 
 `commit` synchronizes an H2 undo-log commit marker before rewriting committed values and clearing the log. A failure after that durable decision can recover as committed. `checkpoint` persists open transactions without committing them. Closing the store synchronizes outstanding state; the next writable open rolls back interrupted open transactions and finishes recorded commit decisions. Prepared transactions remain in `in_doubt` for explicit commit/rollback, and read-only opens cannot resolve them. Use the transaction API for updates to coordinated maps; direct raw-map edits bypass its undo and locking rules.
 
-These are initial storage transactions, separate from `H2.connect`. Snapshot/statement isolation, the remaining isolation levels, complete recovery/upgrade behavior and scalable page/cursor handling remain open. The preserved Java snapshot has a reproduced commit-marker recovery bug; native recovery completes that decision. [MIGRATION.md](MIGRATION.md) records the difference and the precise cross-engine evidence.
+File-backed SQL commits use this storage API internally, while direct map transactions expose its per-key operations. Snapshot/statement isolation, the remaining isolation levels, complete recovery/upgrade behavior and scalable page/cursor handling remain open. The preserved Java snapshot has a reproduced commit-marker recovery bug; native recovery completes that decision. [MIGRATION.md](MIGRATION.md) records the difference and the precise cross-engine evidence.
 
 ## SQL and command line
 
@@ -118,11 +139,12 @@ The implemented subset includes table creation and deletion, `CREATE TABLE ... A
 
 ```sh
 bundle exec h2 --execute "SELECT 1 + 2 AS answer;"
+bundle exec h2 --database people --read-only --execute "TABLE people;"
 bundle exec h2 example.sql
 cat example.sql | bundle exec h2
 ```
 
-Each invocation creates a fresh in-memory database and executes a script. Query results use tab-separated columns with escaped control characters, and SQL errors exit with status 1. `connection.execute(sql)` accepts one statement; `execute_script(sql)` returns a result for each statement in a script. Script execution is sequential and does not add an implicit transaction.
+An invocation uses a fresh in-memory database unless `--database PATH` is supplied. File options include `--read-only`, `--user NAME` and `--password PASSWORD`. Query results use tab-separated columns with escaped control characters, and SQL errors exit with status 1. `connection.execute(sql)` accepts one statement; `execute_script(sql)` returns a result for each statement in a script. Script execution is sequential and does not add an implicit transaction.
 
 ## Compare against the Java reference
 
@@ -133,7 +155,7 @@ mvn -q -f h2/pom.xml -DskipTests package
 bundle exec rake test:reference
 ```
 
-This checks the relational and subquery SQL fixtures against both engines, including result labels, type names, rows, update counts, errors and SQL states. It also cross-reads and cross-writes MVStore files with all three compression modes, checks B-tree lookups, preserves unopened maps, verifies file locks in both directions, and recovers a commit after process death. SQL storage checks read 180 rows with 18 columns and two indexes, modify a row/index from Ruby, reopen through JDBC, and preserve pending transaction data so Java can recover it. Transaction checks compare operation traces, exchange undo logs and prepared transactions, and kill writing processes at open/prepared/commit-decision stages. The reference task reports the Java commit-marker recovery limitation separately. Java is used only by this optional reference check; the Ruby runtime and native test suite do not require it. CI runs the reference comparison separately on Ruby 3.4 and 4.0.
+This checks the relational and subquery SQL fixtures against both engines, including result labels, type names, rows, update counts, errors and SQL states. It also cross-reads and cross-writes MVStore files with all three compression modes, checks B-tree lookups, preserves unopened maps, verifies file locks in both directions, and recovers commits after process death. Storage tests exercise real SQL rows/indexes and prepared transactions. The persistent SQL suite creates databases with each engine, exchanges SQL changes, reopens through both engines, verifies defaults/keys/row ids/credentials/DDL, and kills writers before commit, after commit and after the durable decision. The reference task reports the Java commit-marker recovery limitation separately. Java is used only by this optional reference check; the Ruby runtime and native test suite do not require it. CI runs the reference comparison separately on Ruby 3.4 and 4.0.
 
 ## Upstream and license
 

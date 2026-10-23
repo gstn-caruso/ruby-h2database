@@ -15,7 +15,9 @@ public class JdbcOracle {
     }
 
     public static void main(String[] arguments) throws Exception {
-        try (Connection connection = DriverManager.getConnection("jdbc:h2:mem:ruby_reference");
+        try (Connection connection = arguments.length == 0
+                    ? DriverManager.getConnection("jdbc:h2:mem:ruby_reference")
+                    : DriverManager.getConnection(arguments[0], arguments.length > 1 ? arguments[1] : "sa", arguments.length > 2 ? arguments[2] : "");
                 BufferedReader input = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
             for (String line; (line = input.readLine()) != null;) {
                 String sql = new String(Base64.getDecoder().decode(line), StandardCharsets.UTF_8);

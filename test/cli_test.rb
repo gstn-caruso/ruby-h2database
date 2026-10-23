@@ -5,6 +5,7 @@ require "h2/cli"
 require "stringio"
 require "open3"
 require "tempfile"
+require "tmpdir"
 
 class CLITest < Minitest::Test
   def test_executable_runs_a_script
@@ -20,6 +21,17 @@ class CLITest < Minitest::Test
     status = H2::CLI.new.run([], input: StringIO.new("VALUES 1, 2;"), output: output)
     assert_equal 0, status
     assert_equal "C1\n1\n2\n(2 rows)\n", output.string
+  end
+
+  def test_persistent_database_survives_separate_executable_invocations
+    Dir.mktmpdir("ruby-h2-cli-") do |directory|
+      path = File.join(directory, "database")
+      _output, error, status = Open3.capture3(RbConfig.ruby, "-Ilib", "exe/h2", "--database", path, "--execute", "CREATE TABLE t(v INT); INSERT INTO t VALUES(42);")
+      assert status.success?, error
+      output, error, status = Open3.capture3(RbConfig.ruby, "-Ilib", "exe/h2", "--database", path, "--read-only", "--execute", "TABLE t;")
+      assert status.success?, error
+      assert_equal "V\n42\n(1 row)\n", output
+    end
   end
 
   def test_reads_sql_file

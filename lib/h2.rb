@@ -19,7 +19,7 @@ require_relative "h2/connection"
 require_relative "h2/database"
 
 module H2
-  def self.connect(&block)
-    Database.new.connect(&block)
+  def self.connect(**options, &block)
+    Database.new(**options).connect(owns_database: true, &block)
   end
 end

@@ -2,13 +2,15 @@
 
 module H2
   class Table
-    attr_reader :name, :columns, :keys, :rows
+    attr_reader :name, :columns, :keys, :rows, :last_row_id
 
-    def initialize(name, columns, keys, rows = [])
+    def initialize(name, columns, keys, rows = [], row_ids: nil, last_row_id: 0)
       @name = name
       @columns = columns.freeze
       @keys = keys.freeze
       @rows = rows
+      @row_ids = row_ids || {}.compare_by_identity
+      @last_row_id = last_row_id
       duplicates = columns.group_by(&:name).find { |_name, group| group.length > 1 }
       raise Error.new(42121, "Duplicate column #{duplicates.first}") if duplicates
       raise Error.new(90017, "Multiple primary keys") if keys.count(&:primary) > 1
@@ -17,7 +19,22 @@ module H2
     end
 
     def copy
-      self.class.new(name, columns, keys, rows.dup)
+      self.class.new(name, columns, keys, rows.dup, row_ids: @row_ids.dup, last_row_id: last_row_id)
+    end
+
+    def row_id(row)
+      @row_ids[row]
+    end
+
+    def assign_row_id(row, id)
+      @row_ids[row] = id
+      @last_row_id = [last_row_id, id].max
+    end
+
+    def truncate
+      rows.clear
+      @row_ids.clear
+      @last_row_id = 0
     end
 
     def validate_columns(names)
@@ -29,8 +46,8 @@ module H2
       end
     end
 
-    def convert_row(values)
-      columns.to_h do |column|
+    def convert_row(values, existing_row: nil)
+      row = columns.to_h do |column|
         value = column.type.convert(values.fetch(column.name))
         primary = keys.any? { it.primary && it.columns.include?(column.name) }
         if value.nil? && (!column.nullable || primary)
@@ -38,6 +55,8 @@ module H2
         end
         [column.name, value]
       end.freeze
+      @row_ids[row] = @row_ids[existing_row] if existing_row && @row_ids.key?(existing_row)
+      row
     end
 
     def validate_constraints
@@ -55,6 +74,7 @@ module H2
 
     def seal
       rows.freeze
+      @row_ids.freeze
       freeze
     end
   end
