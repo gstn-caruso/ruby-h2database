@@ -3,14 +3,17 @@
 module H2
   module SQL
     class Queries
-      def initialize(catalog, parameters, ctes: {})
+      attr_reader :context
+
+      def initialize(catalog, parameters, ctes: {}, context: nil)
         @catalog, @ctes = catalog, ctes.freeze
         @parameters = parameters
+        @context = context
         @sources = Sources.new(catalog, parameters, self)
       end
 
       def with_cte(table)
-        self.class.new(@catalog, @parameters, ctes: @ctes.merge(table.name => table))
+        self.class.new(@catalog, @parameters, ctes: @ctes.merge(table.name => table), context: context)
       end
 
       def cte(name)
@@ -18,11 +21,11 @@ module H2
       end
 
       def unbound
-        self.class.new(@catalog, Array.new(@parameters.length, UNBOUND_PARAMETER), ctes: @ctes)
+        self.class.new(@catalog, Array.new(@parameters.length, UNBOUND_PARAMETER), ctes: @ctes, context: context)
       end
 
       def for_definition
-        self.class.new(@catalog, @parameters, ctes: @ctes.reject { |_name, table| table.preparing? })
+        self.class.new(@catalog, @parameters, ctes: @ctes.reject { |_name, table| table.preparing? }, context: context)
       end
 
       def prepare(statement, outer_scope: nil)

@@ -45,7 +45,7 @@ module H2
       Type.new(name, precision, scale)
     end
 
-    def convert(value, name)
+    def convert(value, name, context: nil)
       value = from_ruby(value)
       return parse(name, value.strip) if value.is_a?(String) && !BinaryString.binary?(value)
 
@@ -59,15 +59,21 @@ module H2
       when "TIMESTAMP"
         return value if value.is_a?(TimestampValue)
         return TimestampValue.new(value, TimeValue.new(0)) if value.is_a?(DateValue)
-        raise Error.new(50100, "TIME to TIMESTAMP requires the remaining session date context") if value.is_a?(TimeValue)
+        return TimestampValue.new(session_date(context), value) if value.is_a?(TimeValue)
       end
       raise Error.new(22018, "Cannot convert #{value.class} to #{name}")
     end
 
-    def compare(left, right)
+    def session_date(context)
+      raise Error.new(50100, "Conversion requires a SQL session date context") unless context
+
+      context.current_date
+    end
+
+    def compare(left, right, context: nil)
       names = [name(left), name(right)].compact
       target = names.include?("TIMESTAMP") ? "TIMESTAMP" : names.first
-      convert(left, target) <=> convert(right, target)
+      convert(left, target, context: context) <=> convert(right, target, context: context)
     end
 
     def round_nanos(nanos, scale, clamp: false)

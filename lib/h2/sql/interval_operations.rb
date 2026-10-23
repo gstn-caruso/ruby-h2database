@@ -101,14 +101,13 @@ module H2
         TimestampValue.new(value.date.add_days(days), TimeValue.new(nanos))
       end
 
-      def forced_difference(type, left, right)
+      def forced_difference(type, left, right, context: nil)
         qualifier = Intervals.qualifier(type)
         if IntervalUnits.year_month?(IntervalUnits.ordinal(qualifier)) && !(left.is_a?(TimeValue) && right.is_a?(TimeValue))
-          if left.is_a?(TimeValue) || right.is_a?(TimeValue)
-            raise Error.new(50100, "Year-month differences with TIME require the remaining session date context")
-          end
           a, a_nanos = DateTimeFunctions.components(left)
           b, b_nanos = DateTimeFunctions.components(right)
+          a = Temporal.session_date(context) if left.is_a?(TimeValue)
+          b = Temporal.session_date(context) if right.is_a?(TimeValue)
           months = (a.year - b.year) * 12 + a.month - b.month
           comparison = [a.day, a_nanos] <=> [b.day, b_nanos]
           months -= 1 if months >= 0 && comparison.negative?

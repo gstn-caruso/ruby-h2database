@@ -71,6 +71,7 @@ module H2
       def expression(node, parameters: [], ctes: [])
         render = ->(child) { expression(child, parameters: parameters, ctes: ctes) }
         case node
+        when SQL::CurrentDateTime then node.name + (node.scale.nil? ? "" : "(#{node.scale})")
         when SQL::CapturedExpression then expression(node.expression, parameters: node.parameters, ctes: ctes)
         when SQL::Literal then literal(node.value)
         when SQL::Parameter then literal(parameters.fetch(node.index))

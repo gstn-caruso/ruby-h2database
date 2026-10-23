@@ -110,7 +110,9 @@ schema = [
   "CREATE TABLE calendar_shift AS SELECT DATEADD(ns,1,ts) AS ts,DATEDIFF(month,DATE '1999-12-31',d) AS n FROM calendar",
   "CREATE TABLE periods(lo DATE DEFAULT DATE_TRUNC(month,(SELECT MAX(d) FROM calendar)),hi DATE DEFAULT LAST_DAY((SELECT MAX(d) FROM calendar)),iso INT DEFAULT EXTRACT(iso_week FROM (SELECT MAX(d) FROM calendar)),epoch NUMERIC(28,9) DEFAULT EXTRACT(epoch FROM (SELECT MAX(d) FROM calendar)))",
   "INSERT INTO periods DEFAULT VALUES",
-  "CREATE TABLE trunc_copy AS SELECT DATE_TRUNC(month,d) AS d,DATE_TRUNC(mcs,t) AS t,DATE_TRUNC(iso_week_year,ts) AS ts,EXTRACT(epoch FROM ts) AS epoch,LAST_DAY(d) AS last_day FROM calendar"
+  "CREATE TABLE trunc_copy AS SELECT DATE_TRUNC(month,d) AS d,DATE_TRUNC(mcs,t) AS t,DATE_TRUNC(iso_week_year,ts) AS ts,EXTRACT(epoch FROM ts) AS epoch,LAST_DAY(d) AS last_day FROM calendar",
+  "CREATE TABLE session_defaults(d DATE DEFAULT CURRENT_DATE,t TIME(9) DEFAULT LOCALTIME(9),ts TIMESTAMP(9) DEFAULT LOCALTIMESTAMP(9),promoted TIMESTAMP DEFAULT CAST(TIME '12:00:00' AS TIMESTAMP),m INTERVAL MONTH(5) DEFAULT (CURRENT_DATE-TIME '12:00:00') MONTH)",
+  "INSERT INTO session_defaults DEFAULT VALUES"
 ]
 queries = ["TABLE people ORDER BY id", "TABLE pairs ORDER BY a,b", "TABLE bag ORDER BY a NULLS LAST,b NULLS LAST",
   "TABLE typed", "TABLE target", "TABLE rows_table", 'TABLE "odd""table"', "SELECT id FROM people WHERE name='Ada 😀'",
@@ -124,7 +126,8 @@ queries = ["TABLE people ORDER BY id", "TABLE pairs ORDER BY a,b", "TABLE bag OR
   "TABLE calendar ORDER BY d", "TABLE calendar_default ORDER BY d", "TABLE calendar_shift",
   "SELECT DATEADD(month,1,d) AS d,DATEADD(ns,1,t) AS t,DATEDIFF(second,ts,DATEADD(month,1,ts)) AS n FROM calendar ORDER BY d",
   "TABLE periods ORDER BY lo", "TABLE trunc_copy ORDER BY d",
-  "SELECT EXTRACT(iso_week_year FROM d) AS y,EXTRACT(iso_week FROM d) AS w,DATE_TRUNC(week_year,ts) AS ts FROM calendar ORDER BY d"]
+  "SELECT EXTRACT(iso_week_year FROM d) AS y,EXTRACT(iso_week FROM d) AS w,DATE_TRUNC(week_year,ts) AS ts FROM calendar ORDER BY d",
+  "SELECT d=CAST(ts AS DATE) AS d,t=CAST(ts AS TIME(9)) AS t,promoted=CAST(d AS TIMESTAMP)+TIME '12:00:00' AS p,m=INTERVAL '-1' MONTH AS m FROM session_defaults ORDER BY ts"]
 changes = ["UPDATE people SET amount=amount+1 WHERE id=-7", "INSERT INTO people(id,name) VALUES(20,'new')",
   "DELETE FROM bag WHERE a IS NULL", "UPDATE bag SET b='updated' WHERE a=1", "INSERT INTO bag VALUES(2,'later')",
   "UPDATE source SET v=20", "INSERT INTO target DEFAULT VALUES", "INSERT INTO pairs VALUES('b',3,'z')",
@@ -146,7 +149,8 @@ changes = ["UPDATE people SET amount=amount+1 WHERE id=-7", "INSERT INTO people(
   "INSERT INTO calendar_default DEFAULT VALUES",
   "INSERT INTO calendar_shift SELECT DATEADD(month,1,ts),DATEDIFF(day,DATE '2000-01-01',d) FROM calendar",
   "INSERT INTO periods DEFAULT VALUES",
-  "INSERT INTO trunc_copy SELECT DATE_TRUNC(month,d),DATE_TRUNC(mcs,t),DATE_TRUNC(iso_week_year,ts),EXTRACT(epoch FROM ts),LAST_DAY(d) FROM calendar"]
+  "INSERT INTO trunc_copy SELECT DATE_TRUNC(month,d),DATE_TRUNC(mcs,t),DATE_TRUNC(iso_week_year,ts),EXTRACT(epoch FROM ts),LAST_DAY(d) FROM calendar",
+  "INSERT INTO session_defaults DEFAULT VALUES"]
 
 intervals = [
   ["YEAR", "1"], ["MONTH", "2"], ["DAY", "3"], ["HOUR", "4"], ["MINUTE", "5"], ["SECOND", "6.123456789"],

@@ -15,6 +15,7 @@ module H2
       @closed = false
       @transaction_depth = 0
       @transaction_generation = 0
+      @context = SessionContext.new
     end
 
     def execute(sql, *parameters)
@@ -38,6 +39,7 @@ module H2
 
     def execute_prepared(statement, parameters)
       check_open
+      @context.start_statement
       case statement
       when SQL::Transaction then transaction_command(statement)
       when SQL::SetAutocommit
@@ -51,7 +53,7 @@ module H2
         @database.check_write if ddl || [SQL::Insert, SQL::Update, SQL::Delete].any? { statement.is_a?(it) }
         snapshot = @database.snapshot
         catalog = snapshot.merge(@changes).reject { |_name, value| value.nil? }
-        executor = SQL::Executor.new(catalog, parameters)
+        executor = SQL::Executor.new(catalog, parameters, context: @context)
         result = executor.execute(statement)
         unless executor.changes.empty?
           if @auto_commit || ddl
@@ -66,6 +68,8 @@ module H2
         end
         result
       end
+    ensure
+      @context.end_transaction if @auto_commit
     end
 
     def transaction
@@ -99,6 +103,7 @@ module H2
 
     def commit(ddl: false)
       check_open
+      @context.end_transaction
       @database.publish(@changes, @originals) unless @changes.empty?
       clear_transaction
       restore_autocommit unless ddl
@@ -132,6 +137,7 @@ module H2
     end
 
     def clear_transaction
+      @context.end_transaction
       @transaction_generation += 1
       @changes = {}
       @originals = {}
@@ -150,6 +156,7 @@ module H2
     end
 
     def restore_savepoint(state)
+      @context.end_transaction
       @changes, @originals = state.map(&:dup)
     end
 
@@ -162,6 +169,7 @@ module H2
       when :rollback then rollback
       when :savepoint then @savepoints[statement.name] = savepoint_state
       when :rollback_to
+        @context.end_transaction
         state = @savepoints.fetch(statement.name) { raise Error.new(90063, "Savepoint #{statement.name} not found") }
         restore_savepoint(state)
         index = @savepoints.keys.index(statement.name)

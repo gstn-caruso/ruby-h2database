@@ -6,6 +6,7 @@ module H2
       RESERVED = %w[ALL AND AS ASC BETWEEN BY CASE CAST CHECK CONSTRAINT CREATE CROSS DEFAULT DELETE DESC DISTINCT
         DROP ELSE END EXCEPT EXISTS FALSE FETCH FIRST FOREIGN FROM FULL GROUP HAVING IN INNER INSERT INTERSECT INTO
         IS JOIN KEY LEFT LIKE LIMIT MINUS NATURAL NEXT NOT NULL NULLS OFFSET ON ONLY OR ORDER OUTER PRIMARY REFERENCES
+        CURRENT_DATE LOCALTIME LOCALTIMESTAMP CURRENT_TIME CURRENT_TIMESTAMP
         RIGHT ROW ROWS SELECT SET TABLE THEN TRUE UNION UNIQUE UPDATE USING VALUE VALUES WHEN WHERE WITH].freeze
       PRECEDENCE = {"OR" => 1, "AND" => 2, "=" => 4, "<>" => 4, "!=" => 4, "<" => 4,
         ">" => 4, "<=" => 4, ">=" => 4, "||" => 5, "+" => 6, "-" => 6, "*" => 7, "/" => 7, "%" => 7}.freeze
@@ -687,6 +688,12 @@ module H2
         when "NULL" then Literal.new(nil)
         when "TRUE" then Literal.new(true)
         when "FALSE" then Literal.new(false)
+        when "CURRENT_DATE", "LOCALTIME", "LOCALTIMESTAMP", "CURDATE", "CURTIME", "NOW", "CURRENT_TIME", "CURRENT_TIMESTAMP"
+          return column_or_function(token) if %w[CURDATE CURTIME NOW].include?(token.value) && !keyword?("(")
+          if %w[CURRENT_TIME CURRENT_TIMESTAMP].include?(token.value)
+            raise Error.new(50100, "Zoned current-clock functions have not yet been ported")
+          end
+          current_datetime(token.value)
         when "INTERVAL"
           negative = accept("-")
           accept("+") unless negative
@@ -796,6 +803,26 @@ module H2
             syntax("expression")
           end
         end
+      end
+
+      def current_datetime(name)
+        name = {"CURDATE" => "CURRENT_DATE", "CURTIME" => "LOCALTIME", "NOW" => "LOCALTIMESTAMP"}.fetch(name, name)
+        scale = nil
+        if accept("(")
+          if name == "CURRENT_DATE" && !keyword?(")")
+            raise Error.new(42001, "CURRENT_DATE does not accept a scale")
+          end
+          unless keyword?(")")
+            sign = accept("-") ? -1 : 1
+            accept("+") if sign == 1
+            token = take
+            syntax("fractional precision") unless token.kind == :literal && token.value.is_a?(Integer)
+            scale = sign * token.value
+            raise Error.new(90151, "Current-clock scale must be 0 through 9") unless (0..9).cover?(scale)
+          end
+          expect(")")
+        end
+        CurrentDateTime.new(name, scale)
       end
 
       def datetime_field

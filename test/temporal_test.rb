@@ -91,10 +91,9 @@ class TemporalTest < DatabaseTest
     end
   end
 
-  def test_remaining_zone_and_session_date_conversions_fail_explicitly
+  def test_remaining_zoned_conversions_fail_explicitly
     assert_sql_error 50100, "SELECT TIME '12:00:00Z'"
     assert_sql_error 50100, "SELECT TIMESTAMP '2000-01-01 12:00:00+03:00'"
     assert_sql_error 50100, "CREATE TABLE zoned(t TIMESTAMP WITH TIME ZONE)"
-    assert_sql_error 50100, "SELECT CAST(TIME '12:00:00' AS TIMESTAMP)"
   end
 end
