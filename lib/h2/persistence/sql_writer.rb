@@ -80,6 +80,8 @@ module H2
         when SQL::Function
           if node.name == "EXTRACT"
             "EXTRACT(#{node.arguments.first.value} FROM #{render.call(node.arguments.last)})"
+          elsif SQL::DateTimeFunctions::NAMES.include?(node.name)
+            "#{node.name}(#{node.arguments.first.value}, #{node.arguments.drop(1).map { render.call(it) }.join(', ')})"
           else
             "#{node.name}(#{node.distinct ? 'DISTINCT ' : ''}#{node.arguments.map { render.call(it) }.join(', ')})"
           end

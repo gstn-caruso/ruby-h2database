@@ -115,6 +115,8 @@ Ruby `Date` parameters become DATE; `Time` and `DateTime` parameters become TIME
 
 The initial subset includes typed literals, component casts, comparisons, ordering, keys, set queries, persisted defaults/rows/indexes, integer-day and fractional-day arithmetic, DATE + TIME, TIME scaling, and calendar/time field extraction. `WITHOUT TIME ZONE` is accepted. Zoned types and text, TIME-to-TIMESTAMP conversion requiring the session date, intervals, remaining date/time functions and full temporal coercion remain pending and fail where unsupported. See [MIGRATION.md](MIGRATION.md) for the precise scope and reference evidence.
 
+`DATEADD(field, count, value)` (also `TIMESTAMPADD`) adds calendar units while clamping month/year changes to the last valid day. For example, `DATEADD(month, 1, DATE '2000-01-31')` returns `2000-02-29`. Subday units preserve nanoseconds, wrap TIME within its day, and promote DATE to TIMESTAMP. `DATEDIFF(field, start, finish)` (also `TIMESTAMPDIFF`) counts crossed unit boundaries and returns BIGINT; it does not measure a fractional duration. Field names are static identifiers or strings, while counts and values can be parameters. ISO weeks start Monday; the initial WEEK calendar starts Sunday. Locale-specific calendars and time-zone fields remain pending.
+
 ## Persistent SQL databases
 
 Create a new database and reopen it in a later connection or process:

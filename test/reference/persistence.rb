@@ -102,7 +102,12 @@ schema = [
   "INSERT INTO temporal VALUES(DATE '-1000000000-01-01',TIME '00:00:00.000000001',TIMESTAMP '-1000000000-01-01 12:34:56.123456789'),(DATE '0000-02-29',TIME '12:34:56.123456789',TIMESTAMP '0000-02-29 23:59:59.999999999'),(DATE '1000000000-12-31',TIME '23:59:59.999999999',TIMESTAMP '1000000000-12-31 23:59:59.999999999')",
   "CREATE TABLE temporal_defaults(d DATE DEFAULT DATE '2000-02-29',t TIME(9) DEFAULT TIME '12:34:56.123456789',ts TIMESTAMP(9) DEFAULT TIMESTAMP '2000-02-29 12:34:56.123456789',y INT DEFAULT EXTRACT(YEAR FROM (SELECT MAX(d) FROM temporal)))",
   "INSERT INTO temporal_defaults DEFAULT VALUES",
-  "CREATE TABLE temporal_rows AS SELECT ROW(DATE '2000-01-01',TIME '12:34:56.123456789',TIMESTAMP '2000-01-01 00:00:00.123456789') AS pair"
+  "CREATE TABLE temporal_rows AS SELECT ROW(DATE '2000-01-01',TIME '12:34:56.123456789',TIMESTAMP '2000-01-01 00:00:00.123456789') AS pair",
+  "CREATE TABLE calendar(d DATE PRIMARY KEY,t TIME(9),ts TIMESTAMP(9))",
+  "INSERT INTO calendar VALUES(DATE '2000-01-31',TIME '23:59:59.999999999',TIMESTAMP '2000-01-31 23:59:59.999999999')",
+  "CREATE TABLE calendar_default(d DATE DEFAULT TIMESTAMPADD(month,1,(SELECT MAX(d) FROM calendar)),n BIGINT DEFAULT TIMESTAMPDIFF(day,DATE '2000-01-01',(SELECT MAX(d) FROM calendar)))",
+  "INSERT INTO calendar_default DEFAULT VALUES",
+  "CREATE TABLE calendar_shift AS SELECT DATEADD(ns,1,ts) AS ts,DATEDIFF(month,DATE '1999-12-31',d) AS n FROM calendar"
 ]
 queries = ["TABLE people ORDER BY id", "TABLE pairs ORDER BY a,b", "TABLE bag ORDER BY a NULLS LAST,b NULLS LAST",
   "TABLE typed", "TABLE target", "TABLE rows_table", 'TABLE "odd""table"', "SELECT id FROM people WHERE name='Ada 😀'",
@@ -112,7 +117,9 @@ queries = ["TABLE people ORDER BY id", "TABLE pairs ORDER BY a,b", "TABLE bag OR
   "TABLE cte_rows ORDER BY n", "TABLE cte_default ORDER BY v",
   "WITH q(n) AS (TABLE cte_rows) SELECT n FROM q WHERE n IN(WITH r(n) AS (VALUES 1,3) TABLE r) ORDER BY n",
   "TABLE temporal ORDER BY d", "TABLE temporal_defaults ORDER BY y", "TABLE temporal_rows",
-  "SELECT d FROM temporal WHERE t=TIME '12:34:56.123456789'"]
+  "SELECT d FROM temporal WHERE t=TIME '12:34:56.123456789'",
+  "TABLE calendar ORDER BY d", "TABLE calendar_default ORDER BY d", "TABLE calendar_shift",
+  "SELECT DATEADD(month,1,d) AS d,DATEADD(ns,1,t) AS t,DATEDIFF(second,ts,DATEADD(month,1,ts)) AS n FROM calendar ORDER BY d"]
 changes = ["UPDATE people SET amount=amount+1 WHERE id=-7", "INSERT INTO people(id,name) VALUES(20,'new')",
   "DELETE FROM bag WHERE a IS NULL", "UPDATE bag SET b='updated' WHERE a=1", "INSERT INTO bag VALUES(2,'later')",
   "UPDATE source SET v=20", "INSERT INTO target DEFAULT VALUES", "INSERT INTO pairs VALUES('b',3,'z')",
@@ -129,7 +136,10 @@ changes = ["UPDATE people SET amount=amount+1 WHERE id=-7", "INSERT INTO people(
   "INSERT INTO temporal VALUES(DATE '2000-02-29',TIME '10:00:00.000000002',TIMESTAMP '2000-02-29 00:00:00.000000002')",
   "INSERT INTO temporal VALUES(DATE '2000-02-29',NULL,NULL)",
   "INSERT INTO temporal VALUES(DATE '2000-03-01',TIME '10:00:00.000000002',NULL)",
-  "INSERT INTO temporal_defaults DEFAULT VALUES"]
+  "INSERT INTO temporal_defaults DEFAULT VALUES",
+  "UPDATE calendar SET d=DATEADD(month,1,d),t=DATEADD(ns,1,t),ts=DATEADD(ns,1,ts)",
+  "INSERT INTO calendar_default DEFAULT VALUES",
+  "INSERT INTO calendar_shift SELECT DATEADD(month,1,ts),DATEDIFF(day,DATE '2000-01-01',d) FROM calendar"]
 
 Dir.mktmpdir("sql-persistence-reference-") do |directory|
   [:none, :fast, :high].each do |compression|

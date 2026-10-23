@@ -651,6 +651,23 @@ module H2
           else
             column_or_function(token)
           end
+        when "DATEADD", "TIMESTAMPADD", "DATEDIFF", "TIMESTAMPDIFF"
+          if accept("(")
+            token_field = take
+            unless token_field.kind == :word || (token_field.kind == :literal && token_field.value.is_a?(String) && !BinaryString.binary?(token_field.value))
+              raise Error.new(42001, "Expected a date-time field")
+            end
+            raise Error.new(42001, "Expected a date-time field") if token_field.kind == :word && token_field.value == "NULL"
+            field = DateTimeFunctions.field(token_field.value)
+            expect(",")
+            first = expression
+            expect(",")
+            second = expression
+            expect(")")
+            Function.new(DateTimeFunctions::ALIASES.fetch(token.value, token.value), [Literal.new(field), first, second], false)
+          else
+            column_or_function(token)
+          end
         when "EXTRACT"
           expect("(")
           field = take.value

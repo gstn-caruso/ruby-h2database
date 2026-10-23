@@ -8,7 +8,7 @@ module H2
         "UPPER" => 1..1, "UCASE" => 1..1, "LOWER" => 1..1, "LCASE" => 1..1, "LENGTH" => 1..1, "CHAR_LENGTH" => 1..1,
         "OCTET_LENGTH" => 1..1, "BIT_LENGTH" => 1..1,
         "ABS" => 1..1, "COALESCE" => 1..Float::INFINITY, "IFNULL" => 2..2, "NULLIF" => 2..2, "MOD" => 2..2,
-        "EXTRACT" => 2..2}.merge(TemporalOperations::FIELDS.to_h { [it, 1..1] }).freeze
+        "EXTRACT" => 2..2, "DATEADD" => 3..3, "DATEDIFF" => 3..3}.merge(TemporalOperations::FIELDS.to_h { [it, 1..1] }).freeze
 
       attr_reader :scope, :outer_bindings
 
@@ -64,6 +64,7 @@ module H2
           if %w[SUM AVG].include?(node.name) && %w[BINARY VARBINARY UUID DATE TIME TIMESTAMP].include?(type_of(node.arguments.first)&.name)
             raise Error.new(90015, "Invalid type for #{node.name}")
           end
+          function_type(node) if DateTimeFunctions::NAMES.include?(node.name)
         when Default, Star
           raise Error.new(42000, "Invalid expression #{node.class.name.split('::').last}")
         else
@@ -316,14 +317,37 @@ module H2
       end
 
       def optimized_expression(node)
+        node = dateadd_expression(node) if node.is_a?(Binary)
         if node.is_a?(Subquery) && (plan = subquery_plan(node)).constant?
           Literal.new(constant_subquery(node, plan))
+        elsif node.is_a?(Function) && DateTimeFunctions::NAMES.include?(node.name) && constant?(node)
+          value = Literal.new(evaluate(node))
+          value.value.nil? && function_type(node).name != "NULL" ? Cast.new(value, function_type(node)) : value
+        elsif node.is_a?(Function) && DateTimeFunctions::NAMES.include?(node.name)
+          node.with(arguments: node.arguments.map { optimized_expression(it) })
         else
           node
         end
       end
 
       private
+
+      def dateadd_expression(node)
+        return node unless %w[+ -].include?(node.operator)
+
+        left, right = type_of(node.left), type_of(node.right)
+        if %w[DATE TIMESTAMP].include?(left.name) && right.name == "INTEGER"
+          temporal, count = node.left, node.right
+          if node.operator == "-"
+            count = constant?(count) ? Literal.new(-evaluate(count)) : Unary.new("-", count)
+          end
+        elsif node.operator == "+" && left.name == "INTEGER" && %w[DATE TIMESTAMP].include?(right.name)
+          temporal, count = node.right, node.left
+        else
+          return node
+        end
+        Function.new("DATEADD", [Literal.new("DAY"), count, temporal], false)
+      end
 
       def scalar_value(plan, row)
         result = plan.execute(row, max_rows: 2)
@@ -452,6 +476,14 @@ module H2
       end
 
       def function_type(node)
+        if DateTimeFunctions::NAMES.include?(node.name)
+          type = DateTimeFunctions.type(node.name, node.arguments.first.value, type_of(node.arguments.last))
+          if constant?(node)
+            value = evaluate(node)
+            return type_of(Literal.new(value)) if node.name == "DATEADD" && !value.nil?
+          end
+          return type
+        end
         return Type.new("INTEGER", nil, 0) if node.name == "EXTRACT" || TemporalOperations::FIELDS.include?(node.name)
 
         argument_type = type_of(node.arguments.first)
@@ -635,6 +667,7 @@ module H2
           return first
         end
         return nil if values.any?(&:nil?)
+        return DateTimeFunctions.evaluate(node.name, *values) if DateTimeFunctions::NAMES.include?(node.name)
         return TemporalOperations.extract(first, second) if node.name == "EXTRACT"
         return TemporalOperations.extract(node.name, first) if TemporalOperations::FIELDS.include?(node.name)
 
