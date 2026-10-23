@@ -100,8 +100,24 @@ module H2
 
       def session_dependent?(node)
         return true if node.is_a?(CurrentDateTime)
-        if node.is_a?(Cast) && node.type.name == "TIMESTAMP" && type_of(node.expression)&.name == "TIME"
+        if node.is_a?(Cast) && session_date_conversion?(node.type, type_of(node.expression))
           return true
+        end
+        if node.is_a?(Function) && %w[COALESCE IFNULL].include?(node.name)
+          return true if node.arguments.any? { session_date_conversion?(function_type(node), type_of(it)) }
+        elsif node.is_a?(CaseExpression)
+          if node.operand && node.branches.any? { |condition, _value| session_date_comparison?([node.operand, condition]) }
+            return true
+          end
+          expression, type = prepared_case(node)
+          values = expression.is_a?(CaseExpression) ? expression.branches.map(&:last) + [expression.fallback] : [expression]
+          return true if values.any? { session_date_conversion?(type, type_of(it)) }
+        elsif node.is_a?(Binary) && %w[= <> != < > <= >=].include?(node.operator)
+          return true if session_date_comparison?([node.left, node.right])
+        elsif node.is_a?(Predicate) && [:in, :between, :distinct, :not_distinct].include?(node.operator)
+          return true if session_date_comparison?(node.arguments)
+        elsif node.is_a?(Function) && node.name == "NULLIF"
+          return true if session_date_comparison?(node.arguments)
         end
         if node.is_a?(IntervalDifference) && IntervalUnits.year_month?(IntervalUnits.ordinal(Intervals.qualifier(node.type)))
           names = [type_of(node.left).name, type_of(node.right).name]
@@ -373,6 +389,22 @@ module H2
 
       private
 
+      def session_date_conversion?(target, source)
+        return false unless target && source
+        if target.is_a?(RowType)
+          fields = source.is_a?(RowType) ? source.fields : [source]
+          return target.fields.zip(fields).any? { session_date_conversion?(*it) }
+        end
+        target.name == "TIMESTAMP" && source.name == "TIME"
+      end
+
+      def session_date_comparison?(nodes)
+        nodes.map { type_of(it) }.combination(2).any? do |types|
+          target = Type.common(types)
+          types.any? { session_date_conversion?(target, it) }
+        end
+      end
+
       def datetime_function?(node)
         node.is_a?(Function) && (DateTimeFunctions::NAMES.include?(node.name) || CalendarFunctions::NAMES.include?(node.name))
       end
@@ -420,7 +452,7 @@ module H2
             validate(condition, aggregates: true)
             validate(value, aggregates: true) unless node.operand
             if all_constant
-              if constant?(condition)
+              if constant?(condition) && (!node.operand || !session_date_comparison?([node.operand, condition]))
                 candidate = evaluate(condition)
                 matched = node.operand ? equals(operand, candidate) == true : boolean(candidate) == true
                 if matched
