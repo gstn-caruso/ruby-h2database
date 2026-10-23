@@ -122,7 +122,11 @@ module H2
         loader = lambda do |outer_row|
           arrays = source.arguments.map do |argument|
             value = evaluator.evaluate(argument, outer_row)
-            value.nil? ? [] : (value.is_a?(ArrayValue) || value.is_a?(RowValue) ? value.values : [value])
+            if value.is_a?(JsonValue)
+              value.elements
+            else
+              value.nil? ? [] : (value.is_a?(ArrayValue) || value.is_a?(RowValue) ? value.values : [value])
+            end
           end
           (0...arrays.map(&:length).max).lazy.map do |index|
             values = arrays.map { it[index] }

@@ -141,14 +141,29 @@ class UpstreamTest < DatabaseTest
     [0, 1, 2, 4, 5, 6, *(13..16), 37, 61, 62, *(70..77)].each { check_case(script.cases.fetch(it)) }
   end
 
-  def test_original_unnest_except_plans_and_json
+  def test_original_unnest_except_plans
     script = UpstreamScript.new(File.join(ROOT, "functions/system/unnest.sql"))
-    [*(0..5), *(8..10)].each { check_case(script.cases.fetch(it)) }
+    [*(0..5), *(8..12)].each { check_case(script.cases.fetch(it)) }
   end
 
   def test_original_quantified_array_comparisons_except_indexes_and_plans
     script = UpstreamScript.new(File.join(ROOT, "predicates/quantified-comparison-with-array.sql"))
     [*(0..5), 7, 9, 12, 14, 16, *(18..22)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_json_datatype_except_tooling_other_types_and_helpers
+    script = UpstreamScript.new(File.join(ROOT, "datatypes/json.sql"))
+    [*(0..19), 21, 22, 24, 25, 32, 33, 34, 38, 41, 42, 43, 44, *(48..53), 60, 61, 63, 66, *(69..72), *(74..79)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_json_array_except_plans_and_string_helpers
+    script = UpstreamScript.new(File.join(ROOT, "functions/json/json_array.sql"))
+    [*(0..6), 10, *(15..21)].each { check_case(script.cases.fetch(it)) }
+  end
+
+  def test_original_json_object_except_plans_helpers_and_modes
+    script = UpstreamScript.new(File.join(ROOT, "functions/json/json_object.sql"))
+    [*(0..12), 15, 20, 21].each { check_case(script.cases.fetch(it)) }
   end
 
   private

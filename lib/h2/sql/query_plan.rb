@@ -89,6 +89,8 @@ module H2
         when Binary, IntervalDifference then node.with(left: resolve_alias(node.left, aliases), right: resolve_alias(node.right, aliases))
         when Predicate, Function then node.with(arguments: node.arguments.map { resolve_alias(it, aliases) })
         when QuantifiedArray then node.with(expression: resolve_alias(node.expression, aliases), array: resolve_alias(node.array, aliases))
+        when JsonFormat, JsonPredicate, TypePredicate then node.with(expression: resolve_alias(node.expression, aliases))
+        when JsonConstructor then node.with(arguments: node.arguments.map { resolve_alias(it, aliases) })
         when Cast then node.with(expression: resolve_alias(node.expression, aliases))
         when TimeZoneExpression then node.with(expression: resolve_alias(node.expression, aliases), zone: node.zone && resolve_alias(node.zone, aliases))
         when ArrayConstructor then node.with(expressions: node.expressions.map { resolve_alias(it, aliases) })
@@ -260,6 +262,10 @@ module H2
         when TypedLiteral
           if node.value.nil? && node.type.name == "BOOLEAN"
             "UNKNOWN"
+          elsif node.value.is_a?(DecfloatValue)
+            value = node.value
+            text = value.special ? "'#{value}'" : value.to_s
+            value.special || node.type.precision != value.precision ? "CAST(#{text} AS #{SQLTypeName.format(node.type)})" : text
           elsif node.value.is_a?(BigDecimal) && node.type.name == "NUMERIC"
             text = ArrayType.decimal_text(node.value, node.type.scale)
             node.cast ? "CAST(#{text} AS #{SQLTypeName.format(node.type)})" : text
@@ -276,6 +282,8 @@ module H2
           when false then "FALSE"
           when String then BinaryString.binary?(node.value) ? "X'#{node.value.unpack1('H*')}'" : "'#{node.value.gsub("'", "''")}'"
           when UUIDValue then "UUID '#{node.value}'"
+          when JsonValue then node.value.sql
+          when DecfloatValue then node.value.sql
           when IntervalValue then node.value.to_s
           when DateValue, TimeValue, TimestampValue, TimeTimeZoneValue, TimestampTimeZoneValue then "#{Temporal.name(node.value)} '#{node.value}'"
           when BigDecimal then node.value.to_s("F")
@@ -332,6 +340,15 @@ module H2
           end
         when QuantifiedArray
           "#{expression(node.expression, inside: true)} #{node.operator} #{node.all ? 'ALL' : 'ANY'}(#{expression(node.array, inside: true)})"
+        when JsonFormat then "#{expression(node.expression, inside: true)} FORMAT JSON"
+        when JsonPredicate
+          "#{expression(node.expression, inside: true)} IS#{node.negated ? ' NOT' : ''} JSON#{node.item_type == :value ? '' : ' ' + node.item_type.to_s.upcase}#{node.unique_keys ? ' WITH UNIQUE KEYS' : ''}"
+        when TypePredicate
+          "#{expression(node.expression, inside: true)} IS#{node.negated ? ' NOT' : ''} OF (#{node.types.map { SQLTypeName.format(it) }.join(', ')})"
+        when JsonConstructor
+          arguments = node.arguments.map { expression(it, inside: true) }
+          arguments = arguments.each_slice(2).map { |key, value| "#{key}: #{value}" } if node.kind == :object
+          "JSON_#{node.kind.to_s.upcase}(#{arguments.join(', ')}#{JsonFunctions.flags(node)})"
         when WhenPredicate
           predicate = node.predicate
           first = predicate.is_a?(Binary) ? predicate.left : (predicate.is_a?(Predicate) ? predicate.arguments.first : predicate.expression)
@@ -379,7 +396,9 @@ module H2
         when TableSource then "PUBLIC.#{node.name}"
         when RangeSource then "#{node.name}(#{node.arguments.map { expression(it, inside: true) }.join(', ')})"
         when UnnestSource then "UNNEST(#{node.arguments.map { expression(it, inside: true) }.join(', ')})#{node.ordinality ? ' WITH ORDINALITY' : ''}"
-        when AliasedSource then "#{source(node.source)} #{node.name.match?(/\A_\d+\z/) ? '"' + node.name + '"' : node.name}"
+        when AliasedSource
+          name = node.name.match?(/\A_\d+\z/) ? '"' + node.name + '"' : node.name
+          "#{source(node.source)} #{name}#{node.columns ? '(' + node.columns.join(', ') + ')' : ''}"
         when DerivedSource then "(#{query(node.query)})"
         else "JOIN"
         end

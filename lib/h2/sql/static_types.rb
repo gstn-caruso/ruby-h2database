@@ -10,6 +10,8 @@ module H2
 
       def unnest_type(node)
         type = type_of(node)
+        return type if type&.name == "JSON"
+
         type.is_a?(ArrayType) ? type.element_type : Type.new("NULL", nil, nil)
       end
 

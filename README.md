@@ -138,6 +138,27 @@ end
 
 Quantified predicates work in filters, joins, grouped queries, DML and saved defaults. Simple CASE accepts predicate branches such as `CASE v WHEN =ANY(a) THEN 1 ELSE 2 END`. Window aggregates, other table functions, compatibility modes and complete component metadata remain pending; [MIGRATION.md](MIGRATION.md) records the verified scope.
 
+## JSON
+
+`JSON` and `JSON(n)` store normalized UTF-8 JSON; `n` limits bytes, up to 1,000,000,000. Values retain object order, duplicate keys and decimal scale. Ruby results use immutable `H2::JsonValue` objects with `.bytes`, `.kind`, `.unique_keys?` and canonical `.to_s`. Bind an explicit value with `H2::JsonValue.parse(text_or_bytes)`.
+
+```ruby
+H2.connect do |connection|
+  connection.execute("CREATE TABLE documents(id INT PRIMARY KEY, body JSON)")
+  connection.execute("INSERT INTO documents VALUES(?, ?)", 1,
+    H2::JsonValue.parse('{"a":1,"a":2}'))
+  p connection.execute("SELECT body IS JSON WITH UNIQUE KEYS FROM documents").rows # => [[false]]
+  value = connection.execute("SELECT JSON_OBJECT('id':id,'body':body) FROM documents").rows.first.first
+  p value.to_s # => '{"id":1,"body":{"a":1,"a":2}}'
+end
+```
+
+`CAST(text AS JSON)` creates a JSON string. `text FORMAT JSON`, binary casts and `JSON '...'` / `JSON X'...'` parse JSON. SQL NULL remains distinct from JSON `null`. `JSON_ARRAY` and `JSON_OBJECT` support `NULL ON NULL` / `ABSENT ON NULL`; objects also support `WITH UNIQUE KEYS`. A single query argument to `JSON_ARRAY` collects its rows in query order. As in H2, constant scalar subqueries still undergo scalar cardinality checks.
+
+`IS [NOT] JSON` accepts VALUE, ARRAY, OBJECT or SCALAR and optional unique-key validation. `IS [NOT] OF(type, ...)` tests SQL type identity. JSON array indexing starts at 1 and returns SQL NULL outside the array; `UNNEST` returns JSON elements, including JSON `null`. JSON keys compare normalized bytes, so `JSON '1'` and `JSON '1.0'` remain distinct. Tables, key indexes, nested SQL arrays, constructors and query defaults reopen through native storage and JDBC.
+
+Initial `DECFLOAT(p)` values preserve decimal exponents, precision rounding and non-finite values for catalog/default interoperability. JSON conversion rejects non-finite numbers. Full DECFLOAT arithmetic, aggregates and inference, JSON aggregates, LOB/geometry conversions, compatibility modes and general optimization remain pending; see [MIGRATION.md](MIGRATION.md).
+
 ## Dates and times
 
 `DATE`, `TIME[(0..9)]` and `TIMESTAMP[(0..9)]` store calendar and wall-clock values without a time zone. Results use immutable `H2::DateValue`, `H2::TimeValue` and `H2::TimestampValue` objects, with canonical text from `.to_s`. Dates cover H2's Gregorian year range from -1,000,000,000 through 1,000,000,000. Times retain nanoseconds; column assignment and casts round to their declared scale, which defaults to 0 for TIME and 6 for TIMESTAMP.

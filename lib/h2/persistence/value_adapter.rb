@@ -19,7 +19,9 @@ module H2
         data = if type.name == "NUMERIC"
           scale = type.scale || 0
           MVStore::Decimal.new((value * (10**scale)).to_i, scale)
-        elsif type.name == "UUID"
+        elsif type.name == "DECFLOAT"
+          value.special || MVStore::Decimal.new(value.unscaled, value.scale)
+        elsif %w[UUID JSON].include?(type.name)
           value.bytes
         elsif type.name == "DATE"
           value.packed
@@ -58,6 +60,9 @@ module H2
         when :time_tz then TimeTimeZoneValue.new(*value.data)
         when :timestamp_tz then TimestampTimeZoneValue.new(DateValue.from_packed(value.data[0]), TimeValue.new(value.data[1]), value.data[2])
         when :interval then IntervalValue.new(IntervalUnits::QUALIFIERS.fetch(value.data[0]), *value.data.drop(1))
+        when :json then JsonValue.parse(value.data)
+        when :decfloat
+          value.data.is_a?(MVStore::Decimal) ? DecfloatValue.new(value.data.unscaled, value.data.scale, nil) : DecfloatValue.new(0, 0, value.data)
         else value.to_ruby
         end
         type.convert(data)

@@ -251,6 +251,24 @@ module H2
         name = take.value
         name = TYPE_NAMES.fetch(name, name)
         return Type.new("NULL", nil, nil) if name == "NULL"
+        if name == "DECFLOAT"
+          precision = 100_000
+          if accept("(")
+            precision = positive_integer
+            expect(")")
+            raise Error.new(90150, "Invalid DECFLOAT precision") if precision > 100_000
+          end
+          return Type.new("DECFLOAT", precision, 0)
+        end
+        if name == "JSON"
+          precision = JsonValue::MAX_PRECISION
+          if accept("(")
+            precision = positive_integer
+            expect(")")
+            raise Error.new(90150, "Invalid JSON precision") if precision > JsonValue::MAX_PRECISION
+          end
+          return Type.new("JSON", precision, 0)
+        end
         raise Error.new(42001, "Expected array element type") if name == "ARRAY"
         return interval_type.first if name == "INTERVAL"
         return temporal_type(name) if Temporal::NAMES.include?(name)
@@ -667,7 +685,9 @@ module H2
           if minimum <= 4 && keyword?("IS")
             take
             negate = accept("NOT")
-            if accept("DISTINCT")
+            if keyword?("JSON") || keyword?("OF")
+              left = json_or_type_predicate(left, !!negate)
+            elsif accept("DISTINCT")
               expect("FROM")
               left = comparison(left, negate ? "IS NOT DISTINCT FROM" : "IS DISTINCT FROM")
             else
@@ -701,6 +721,10 @@ module H2
             left = negate ? Unary.new("NOT", node) : node
           elsif accept("::")
             left = Cast.new(left, parse_type)
+          elsif keyword?("FORMAT") && @tokens[@position + 1]&.value == "JSON"
+            take
+            take
+            left = JsonFormat.new(left)
           elsif accept("[")
             left = ArrayElement.new(left, expression)
             expect("]")
@@ -755,7 +779,9 @@ module H2
         elsif operand && keyword?("IS")
           take
           negate = accept("NOT")
-          if accept("DISTINCT")
+          if keyword?("JSON") || keyword?("OF")
+            WhenPredicate.new(json_or_type_predicate(operand, !!negate))
+          elsif accept("DISTINCT")
             expect("FROM")
             WhenPredicate.new(comparison(operand, negate ? "IS NOT DISTINCT FROM" : "IS DISTINCT FROM"))
           else
@@ -766,6 +792,27 @@ module H2
         else
           expression
         end
+      end
+
+      def json_or_type_predicate(left, negate)
+        if accept("OF")
+          expect("(")
+          types = list { parse_type }
+          expect(")")
+          return TypePredicate.new(left, types, negate)
+        end
+        expect("JSON")
+        item = %w[VALUE ARRAY OBJECT SCALAR].include?(current.value) ? take.value.downcase.to_sym : :value
+        unique = false
+        if accept("WITH")
+          expect("UNIQUE")
+          accept("KEYS")
+          unique = true
+        elsif accept("WITHOUT")
+          expect("UNIQUE")
+          accept("KEYS")
+        end
+        JsonPredicate.new(left, item, unique, negate)
       end
 
       def predicate_start?
@@ -779,7 +826,7 @@ module H2
 
       def prefix
         token = take
-        if token.kind == :literal && token.value.is_a?(DecimalLiteral)
+        if token.kind == :literal && (token.value.is_a?(DecimalLiteral) || token.value.is_a?(TypedLiteral))
           return token.value
         end
         return Literal.new(token.value) if token.kind == :literal
@@ -840,6 +887,14 @@ module H2
         when "UUID"
           if current.kind == :literal && current.value.is_a?(String) && !BinaryString.binary?(current.value)
             Literal.new(UUIDValue.parse(take.value))
+          else
+            column_or_function(token)
+          end
+        when "JSON"
+          if current.kind == :literal && current.value.is_a?(String)
+            text = take.value.dup
+            text << take.value while current.kind == :literal && current.value.is_a?(String) && current.value.encoding == text.encoding
+            Literal.new(JsonValue.parse(text))
           else
             column_or_function(token)
           end
@@ -947,6 +1002,7 @@ module H2
       def column_or_function(token)
         name = token.value
         if accept("(")
+          return json_constructor(name) if %w[JSON_ARRAY JSON_OBJECT].include?(name)
           return aggregate(name) if Aggregate::NAMES.include?(name)
 
           name = "CARDINALITY" if name == "ARRAY_LENGTH"
@@ -967,6 +1023,53 @@ module H2
         else
           ColumnRef.new(name, nil)
         end
+      end
+
+      def json_constructor(name)
+        array = name == "JSON_ARRAY"
+        arguments = []
+        unless keyword?(")") || json_flags?(array)
+          loop do
+            if array
+              arguments << (query_start? ? Subquery.new(query) : expression)
+            else
+              key = accept("KEY")
+              arguments << expression
+              key ? expect("VALUE") : (accept("VALUE") || expect(":"))
+              arguments << expression
+            end
+            break unless accept(",")
+          end
+        end
+        absent = array
+        if accept("ABSENT")
+          expect("ON")
+          expect("NULL")
+          absent = true
+        elsif accept("NULL")
+          expect("ON")
+          expect("NULL")
+          absent = false
+        end
+        unique = false
+        if !array && accept("WITH")
+          expect("UNIQUE")
+          expect("KEYS")
+          unique = true
+        elsif !array && accept("WITHOUT")
+          expect("UNIQUE")
+          expect("KEYS")
+        end
+        expect(")")
+        JsonConstructor.new(array ? :array : :object, arguments, absent, unique)
+      rescue Error => error
+        raise Error.new(42001, error.message.sub(/ \[42000\]\z/, '')) if error.code == 42000
+        raise
+      end
+
+      def json_flags?(array)
+        (%w[ABSENT NULL].include?(current.value) && @tokens[@position + 1]&.value == "ON" && @tokens[@position + 2]&.value == "NULL") ||
+          (!array && %w[WITH WITHOUT].include?(current.value) && @tokens[@position + 1]&.value == "UNIQUE" && @tokens[@position + 2]&.value == "KEYS")
       end
 
       def aggregate(name)

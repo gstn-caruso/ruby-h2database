@@ -40,7 +40,7 @@ module H2
         return TypedLiteral.new(value, type, false) unless type.name == "NUMERIC"
 
         digits = ArrayType.decimal_text(value, type.scale).delete('-.').sub(/\A0+/, '')
-        DecimalLiteral.new(value, [digits.length, 1].max, type.scale)
+        DecimalLiteral.new(value, [digits.length, 1].max, type.scale, nil)
       end
     end
   end
