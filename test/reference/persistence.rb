@@ -208,6 +208,15 @@ schema.concat(["CREATE TABLE json_decimals(v DECFLOAT(12) PRIMARY KEY)",
   "INSERT INTO json_decimals VALUES(CAST('1e100' AS DECFLOAT)),(CAST('1.2300' AS DECFLOAT)),(CAST('NaN' AS DECFLOAT)),(CAST('Infinity' AS DECFLOAT)),(CAST('-Infinity' AS DECFLOAT))"])
 queries << "TABLE json_decimals ORDER BY v"
 changes << "INSERT INTO json_decimals VALUES(CAST('9.999' AS DECFLOAT(3)))"
+schema.concat([
+  "CREATE TABLE decimal_operands(a DECFLOAT(5),b DECFLOAT(3))",
+  "INSERT INTO decimal_operands VALUES(1,6)",
+  "CREATE TABLE decimal_defaults(v DECFLOAT(20) DEFAULT (SELECT a/(b+1E0) FROM decimal_operands),p DECFLOAT(20) DEFAULT (SELECT a/(b+CAST(1 AS DECFLOAT(8))) FROM decimal_operands),s DECFLOAT(20) DEFAULT (SELECT SUM(a)+AVG(b) FROM decimal_operands))",
+  "INSERT INTO decimal_defaults DEFAULT VALUES",
+  "CREATE TABLE decimal_results AS SELECT a+b AS a,a-b AS s,a*b AS m,a/b AS d FROM decimal_operands"
+])
+queries.concat(["TABLE decimal_defaults ORDER BY v", "TABLE decimal_results", "SELECT SUM(a) AS s,AVG(b) AS a FROM decimal_operands"])
+changes.concat(["UPDATE decimal_operands SET b=8", "INSERT INTO decimal_defaults DEFAULT VALUES", "INSERT INTO decimal_results SELECT a+b,a-b,a*b,a/b FROM decimal_operands"])
 
 intervals = [
   ["YEAR", "1"], ["MONTH", "2"], ["DAY", "3"], ["HOUR", "4"], ["MINUTE", "5"], ["SECOND", "6.123456789"],

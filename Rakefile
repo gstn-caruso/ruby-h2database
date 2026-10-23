@@ -23,6 +23,7 @@ namespace :test do
     ruby "test/reference/array_relations.rb"
     ruby "test/reference/quantified.rb"
     ruby "test/reference/json_values.rb"
+    ruby "test/reference/decfloat.rb"
     ruby "test/reference/mvstore.rb"
     ruby "test/reference/sql_storage.rb"
     ruby "test/reference/transactions.rb"

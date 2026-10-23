@@ -265,7 +265,7 @@ module H2
           elsif node.value.is_a?(DecfloatValue)
             value = node.value
             text = value.special ? "'#{value}'" : value.to_s
-            value.special || node.type.precision != value.precision ? "CAST(#{text} AS #{SQLTypeName.format(node.type)})" : text
+            node.type.precision != value.precision ? "CAST(#{text} AS #{SQLTypeName.format(node.type)})" : text
           elsif node.value.is_a?(BigDecimal) && node.type.name == "NUMERIC"
             text = ArrayType.decimal_text(node.value, node.type.scale)
             node.cast ? "CAST(#{text} AS #{SQLTypeName.format(node.type)})" : text
@@ -283,7 +283,7 @@ module H2
           when String then BinaryString.binary?(node.value) ? "X'#{node.value.unpack1('H*')}'" : "'#{node.value.gsub("'", "''")}'"
           when UUIDValue then "UUID '#{node.value}'"
           when JsonValue then node.value.sql
-          when DecfloatValue then node.value.sql
+          when DecfloatValue then node.value.special ? "'#{node.value}'" : node.value.to_s
           when IntervalValue then node.value.to_s
           when DateValue, TimeValue, TimestampValue, TimeTimeZoneValue, TimestampTimeZoneValue then "#{Temporal.name(node.value)} '#{node.value}'"
           when BigDecimal then node.value.to_s("F")

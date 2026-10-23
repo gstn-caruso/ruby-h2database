@@ -13,6 +13,15 @@ module H2
       type.name == "NUMERIC" ? [type.precision || 100_000, type.scale || 0] : NUMERIC_WIDTHS.fetch(type.name, [100_000, 50_000])
     end
 
+    def self.decfloat_precision(type)
+      case type.name
+      when "BOOLEAN", "NUMERIC", "DECFLOAT" then type.precision || 100_000
+      when "REAL" then 7
+      when "DOUBLE" then 17
+      else NUMERIC_WIDTHS.fetch(type.name, [100_000]).first
+      end
+    end
+
     def self.check_comparable(left, right)
       a, b = left, right
       a = a.fields.first while a.is_a?(RowType) && a.fields.length == 1
@@ -76,6 +85,11 @@ module H2
 
       name = types.max_by { ORDER.index(it.name) || -1 }.name
       names = types.map(&:name)
+      if %w[REAL DOUBLE].include?(name) && (names & %w[BIGINT NUMERIC]).any?
+        name = "DECFLOAT"
+      elsif name == "REAL" && names.include?("INTEGER")
+        name = "DOUBLE"
+      end
       if (names & Temporal::NAMES).any?
         if (names - (%w[CHAR VARCHAR] + Temporal::NAMES)).any?
           raise Error.new(22018, "Incompatible temporal SQL types")
@@ -83,7 +97,7 @@ module H2
         name = Temporal.common_name(names)
       end
       if (names.include?("UUID") && (names - %w[UUID CHAR VARCHAR BINARY VARBINARY]).any?) ||
-          ((names & %w[BINARY VARBINARY]).any? && (names & %w[BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE]).any?)
+          ((names & %w[BINARY VARBINARY]).any? && (names & %w[BOOLEAN TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE DECFLOAT]).any?)
         raise Error.new(22018, "Incompatible SQL types #{names.join(', ')}")
       end
       precision = types.any? { it.precision.nil? } ? nil : types.map(&:precision).max
@@ -93,7 +107,7 @@ module H2
         scale = numeric.map(&:last).max
         precision = [numeric.map { |width, source_scale| width + scale - source_scale }.max, 100_000].min
       elsif name == "DECFLOAT"
-        precision = types.map { it.precision || 100_000 }.max
+        precision = types.map { decfloat_precision(it) }.max
         scale = 0
       end
       return Temporal.type(name, scale) if Temporal::NAMES.include?(name)
@@ -154,9 +168,11 @@ module H2
         end
         decimal
       when "REAL"
-        [Float(numeric_input(value))].pack("f").unpack1("f")
+        number = [floating(value)].pack("f").unpack1("f")
+        number.zero? ? 0.0 : number
       when "DOUBLE"
-        Float(numeric_input(value))
+        number = floating(value)
+        number.zero? ? 0.0 : number
       when "BOOLEAN"
         boolean(value)
       else
@@ -192,6 +208,19 @@ module H2
     end
 
     private
+
+    def floating(value)
+      value = numeric_input(value)
+      if value.is_a?(String)
+        value = value.encode(Encoding::UTF_8).sub(/\A[\x00-\x20]+/, '').sub(/[\x00-\x20]+\z/, '')
+        special = {"NaN" => Float::NAN, "+NaN" => Float::NAN, "-NaN" => Float::NAN,
+          "Infinity" => Float::INFINITY, "+Infinity" => Float::INFINITY, "-Infinity" => -Float::INFINITY}[value]
+        return special if special
+      end
+      Float(value)
+    rescue EncodingError
+      raise Error.new(22018, "Invalid floating-point text encoding")
+    end
 
     def numeric_input(value)
       return value.to_d if value.is_a?(DecfloatValue)

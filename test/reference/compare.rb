@@ -28,7 +28,8 @@ normalize = lambda do |value, type|
   if %w[BINARY VARBINARY].include?(type)
     value.unpack1("H*")
   elsif %w[TINYINT SMALLINT INTEGER BIGINT NUMERIC REAL DOUBLE].include?(type)
-    BigDecimal(value.to_s).to_s("F")
+    text = type == "REAL" && value.is_a?(Float) ? H2::JsonValue.float_text(value, real: true) : value.to_s
+    BigDecimal(text).to_s("F")
   elsif value == true || value == false
     value ? "TRUE" : "FALSE"
   else

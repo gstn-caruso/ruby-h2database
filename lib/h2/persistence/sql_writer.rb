@@ -84,7 +84,10 @@ module H2
         case node
         when SQL::DecimalLiteral then node.text || ArrayType.decimal_text(node.value, node.scale)
         when SQL::TypedLiteral
-          if node.value.is_a?(BigDecimal) && node.type.name == "NUMERIC"
+          if node.value.is_a?(DecfloatValue)
+            value = node.value
+            "CAST(#{value.special ? "'#{value}'" : value.to_s} AS #{type(node.type)})"
+          elsif node.value.is_a?(BigDecimal) && node.type.name == "NUMERIC"
             text = ArrayType.decimal_text(node.value, node.type.scale)
             node.cast ? "CAST(#{text} AS #{type(node.type)})" : text
           else

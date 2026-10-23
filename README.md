@@ -159,7 +159,23 @@ end
 
 `IS [NOT] JSON` accepts VALUE, ARRAY, OBJECT or SCALAR and optional unique-key validation. `IS [NOT] OF(type, ...)` tests SQL type identity. JSON array indexing starts at 1 and returns SQL NULL outside the array; `UNNEST` returns JSON elements, including JSON `null`. JSON keys compare normalized bytes, so `JSON '1'` and `JSON '1.0'` remain distinct. Tables, key indexes, nested SQL arrays, constructors and query defaults reopen through native storage and JDBC.
 
-Initial `DECFLOAT(p)` values preserve decimal exponents, precision rounding and non-finite values for catalog/default interoperability. JSON conversion rejects non-finite numbers. Full DECFLOAT arithmetic, aggregates and inference, JSON aggregates, LOB/geometry conversions, compatibility modes and general optimization remain pending; see [MIGRATION.md](MIGRATION.md).
+JSON aggregates, LOB/geometry conversions, compatibility modes and general optimization remain pending; see [MIGRATION.md](MIGRATION.md).
+
+## Decimal floating point
+
+`DECFLOAT(p)` stores decimal floating point with 1–100,000 significant digits; the default precision is 100,000. Scientific literals such as `1.2300E100` infer this type and normalize trailing zeros. Results use immutable `H2::DecfloatValue` objects with `.to_s`, `.precision`, `.finite?` and `.special`; bind explicit values with `H2::DecfloatValue.parse(text)`.
+
+```ruby
+H2.connect do |connection|
+  result = connection.execute("SELECT CAST(? AS DECFLOAT(5))/CAST(? AS DECFLOAT(3)) AS ratio",
+    H2::DecfloatValue.parse("1"), H2::DecfloatValue.parse("6"))
+  p result.rows.first.first.to_s # => "0.166667"
+end
+```
+
+Arithmetic supports `+`, `-`, `*`, `/`, `%`, `ABS`, `SIGN` and `MOD`, including infinities and `NaN`. Division and casts follow H2's precision and rounding rules; division by zero raises 22012, including non-finite dividends. `SUM` and `AVG` support DISTINCT and FILTER; SUM retains non-finite values, while AVG rejects them with 22018. DOUBLE sums and averages also return DECFLOAT. Finite values convert to JSON; non-finite JSON conversion fails with 22018.
+
+Columns, CTAS, key indexes, arrays and dynamic arithmetic/aggregate defaults retain values and operand precision across native/JDBC file reopen. Remaining numeric functions, aliases, conversions and full metadata/optimizer behavior are still migration work.
 
 ## Dates and times
 

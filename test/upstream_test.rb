@@ -156,6 +156,11 @@ class UpstreamTest < DatabaseTest
     [*(0..19), 21, 22, 24, 25, 32, 33, 34, 38, 41, 42, 43, 44, *(48..53), 60, 61, 63, 66, *(69..72), *(74..79)].each { check_case(script.cases.fetch(it)) }
   end
 
+  def test_original_decfloat_casts_mixed_types_specials_and_scientific_literals
+    script = UpstreamScript.new(File.join(ROOT, "datatypes/decfloat.sql"))
+    [*(10..16), *(27..40)].each { check_case(script.cases.fetch(it)) }
+  end
+
   def test_original_json_array_except_plans_and_string_helpers
     script = UpstreamScript.new(File.join(ROOT, "functions/json/json_array.sql"))
     [*(0..6), 10, *(15..21)].each { check_case(script.cases.fetch(it)) }

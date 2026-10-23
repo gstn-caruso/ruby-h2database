@@ -156,7 +156,15 @@ module H2
           Integer(radix.delete("_"), 0)
         else
           decimal = @scanner.scan(/(?:\d(?:_?\d)*(?:\.(?:\d(?:_?\d)*)?)?|\.\d(?:_?\d)*)(?:[Ee][+-]?\d(?:_?\d)*)?/).delete("_")
-          if decimal.match?(/[.Ee]/)
+          if decimal.match?(/[Ee]/)
+            begin
+              DecfloatValue.parse(decimal)
+            rescue Error => error
+              raise unless error.code == 22018
+
+              raise Error.new(42001, "Invalid scientific literal")
+            end
+          elsif decimal.include?('.')
             mantissa, exponent = decimal.split(/[Ee]/)
             scale = (mantissa.split('.', 2)[1]&.length || 0) - exponent.to_i
             digits = mantissa.delete('.').sub(/\A0+/, '')
