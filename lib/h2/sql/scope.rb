@@ -12,11 +12,12 @@ module H2
         new(bindings, qualifiers: qualifiers.compact)
       end
 
-      def initialize(bindings, visible: bindings, qualifiers: bindings.map(&:qualifier).compact.uniq)
+      def initialize(bindings, visible: bindings, qualifiers: bindings.map(&:qualifier).compact.uniq, parent: nil)
         @bindings = bindings.freeze
         @visible = visible.freeze
         @qualifiers = qualifiers.freeze
         @resolved = {}
+        @parent = parent
       end
 
       def resolve(reference)
@@ -27,12 +28,17 @@ module H2
             bindings.select { it.name == reference.name }
           end
           raise Error.new(90059, "Ambiguous column #{reference.name}") if candidates.length > 1
+          return @resolved[reference] = @parent.resolve(reference) if candidates.empty? && @parent
           if candidates.empty?
             raise Error.new(42122, "Column #{[reference.qualifier, reference.name].compact.join('.')} not found")
           end
 
           @resolved[reference] = candidates.first
         end
+      end
+
+      def local?(binding)
+        bindings.include?(binding)
       end
 
       def star(qualifier)

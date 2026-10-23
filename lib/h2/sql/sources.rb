@@ -2,9 +2,13 @@
 
 module H2
   module SQL
-    class Relation < Data.define(:bindings, :visible, :rows, :qualifiers)
-      def scope
-        Scope.new(bindings, visible: visible, qualifiers: qualifiers)
+    class Relation < Data.define(:bindings, :visible, :qualifiers, :outer_bindings, :loader)
+      def scope(parent = nil)
+        Scope.new(bindings, visible: visible, qualifiers: qualifiers, parent: parent)
+      end
+
+      def rows(outer_row = {})
+        loader.call(outer_row)
       end
     end
 
@@ -38,24 +42,26 @@ module H2
         @catalog, @parameters, @queries = catalog, parameters, queries
       end
 
-      def resolve(source)
+      def prepare(source, outer_scope: nil)
         case source
-        when nil then Relation.new([], [], [{}], [])
+        when nil then Relation.new([], [], [], [], ->(_row) { [{}] })
         when TableSource
           table = @catalog.fetch(source.name) { raise Error.new(42102, "Table #{source.name} not found") }
           bindings = table.columns.map { binding(it.name, source.name, it.type) }
-          rows = table.rows.lazy.map do |row|
-            bindings.to_h { [it.key, row.fetch(it.name)] }
+          loader = lambda do |_outer_row|
+            table.rows.lazy.map { |row| bindings.to_h { [it.key, row.fetch(it.name)] } }
           end
-          Relation.new(bindings, bindings, rows, [source.name])
-        when RangeSource then range(source)
+          Relation.new(bindings, bindings, [source.name], [], loader)
+        when RangeSource then range(source, outer_scope)
         when DerivedSource
-          result = @queries.execute(source.query)
-          bindings = result.columns.each_with_index.map { |name, index| binding(name, nil, result.types[index]) }
-          rows = result.rows.lazy.map { |row| bindings.each_with_index.to_h { |column, index| [column.key, row[index]] } }
-          Relation.new(bindings, bindings, rows, [])
-        when AliasedSource then rename(resolve(source.source), source.name, source.columns)
-        when JoinSource then join(source)
+          plan = @queries.prepare(source.query)
+          bindings = plan.columns.each_with_index.map { |name, index| binding(name, nil, plan.types[index]) }
+          loader = lambda do |_outer_row|
+            plan.execute.rows.lazy.map { |row| bindings.each_with_index.to_h { |column, index| [column.key, row[index]] } }
+          end
+          Relation.new(bindings, bindings, [], plan.outer_bindings, loader)
+        when AliasedSource then rename(prepare(source.source, outer_scope: outer_scope), source.name, source.columns)
+        when JoinSource then join(source, outer_scope)
         else raise Error.new(50100, "Table expression not yet ported")
         end
       end
@@ -73,59 +79,65 @@ module H2
         raise Error.new(42121, "Duplicate column #{duplicate.first}") if duplicate
 
         bindings = names.each_with_index.map { |column, index| binding(column, name, relation.visible[index].type) }
-        rows = relation.rows.lazy.map do |row|
-          bindings.each_with_index.to_h { |column, index| [column.key, row.fetch(relation.visible[index].key)] }
+        loader = lambda do |outer_row|
+          relation.rows(outer_row).lazy.map do |row|
+            bindings.each_with_index.to_h { |column, index| [column.key, row.fetch(relation.visible[index].key)] }
+          end
         end
-        Relation.new(bindings, bindings, rows, [name])
+        Relation.new(bindings, bindings, [name], relation.outer_bindings, loader)
       end
 
-      def range(source)
+      def range(source, outer_scope)
         unless %w[SYSTEM_RANGE GENERATE_SERIES].include?(source.name)
           raise Error.new(50100, "Table function #{source.name} not yet ported")
         end
         unless (2..3).cover?(source.arguments.length)
           raise Error.new(7001, "SYSTEM_RANGE requires two or three arguments")
         end
-        evaluator = Evaluator.new(@parameters)
+        evaluator = Evaluator.new(@parameters, queries: @queries)
+        source.arguments.each { evaluator.validate(it) }
         type = Type.new("BIGINT", nil, 0)
-        arguments = source.arguments.map do |argument|
-          evaluator.validate(argument)
-          type.convert(evaluator.evaluate(argument)) || 0
-        end
-        first, last, step = arguments
         column = binding("X", source.name, type)
-        Relation.new([column], [column], RangeRows.new(first, last, step || 1, column.key), [source.name])
+        loader = lambda do |outer_row|
+          arguments = source.arguments.map { type.convert(evaluator.evaluate(it, outer_row)) || 0 }
+          first, last, step = arguments
+          RangeRows.new(first, last, step || 1, column.key)
+        end
+        Relation.new([column], [column], [source.name], evaluator.outer_bindings, loader)
       end
 
-      def join(source)
-        left = resolve(source.left)
-        right = resolve(source.right)
+      def join(source, outer_scope)
+        left = prepare(source.left, outer_scope: outer_scope)
+        right = prepare(source.right, outer_scope: outer_scope)
         duplicate = (left.qualifiers & right.qualifiers).first
         raise Error.new(42123, "Duplicate table alias #{duplicate}") if duplicate
 
         bindings = left.bindings + right.bindings
         qualifiers = left.qualifiers + right.qualifiers
-        evaluator = Evaluator.new(@parameters, scope: Scope.new(bindings, visible: left.visible + right.visible, qualifiers: qualifiers))
+        scope = Scope.new(bindings, visible: left.visible + right.visible, qualifiers: qualifiers, parent: outer_scope)
+        evaluator = Evaluator.new(@parameters, scope: scope, queries: @queries)
         evaluator.validate(source.condition)
         names = source.natural ? left.visible.map(&:name) & right.visible.map(&:name) : source.using_columns.uniq
-
         pairs = names.map { [left.scope.resolve(ColumnRef.new(it, nil)), right.scope.resolve(ColumnRef.new(it, nil))] }
         common = pairs.map { source.kind == :right ? it.last : it.first }
         visible = common + left.visible.reject { names.include?(it.name) } + right.visible.reject { names.include?(it.name) }
         preserved, other = source.kind == :right ? [right, left] : [left, right]
-        other_rows = other.rows.to_a
-        null_row = other.bindings.to_h { [it.key, nil] }
         outer = [:left, :right].include?(source.kind)
-        rows = preserved.rows.flat_map do |row|
-          matches = other_rows.filter_map do |candidate|
-            combined = row.merge(candidate)
-            next unless join_matches?(source.condition, pairs, evaluator, combined)
+        null_row = other.bindings.to_h { [it.key, nil] }
+        loader = lambda do |outer_row|
+          other_rows = other.rows(outer_row).to_a
+          preserved.rows(outer_row).lazy.flat_map do |row|
+            matches = other_rows.filter_map do |candidate|
+              combined = row.merge(candidate)
+              next unless join_matches?(source.condition, pairs, evaluator, outer_row.merge(combined))
 
-            combined
+              combined
+            end
+            matches.empty? && outer ? [row.merge(null_row)] : matches
           end
-          matches.empty? && outer ? [row.merge(null_row)] : matches
         end
-        Relation.new(bindings, visible, rows, qualifiers)
+        free = (left.outer_bindings + right.outer_bindings + evaluator.outer_bindings).uniq
+        Relation.new(bindings, visible, qualifiers, free, loader)
       end
 
       def join_matches?(condition, pairs, evaluator, row)
@@ -133,7 +145,7 @@ module H2
 
         pairs.all? do |left, right|
           a, b = row.fetch(left.key), row.fetch(right.key)
-          !a.nil? && !b.nil? && evaluator.compare(a, b).zero?
+          evaluator.equals(a, b) == true
         end
       end
     end

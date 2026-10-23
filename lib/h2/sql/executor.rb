@@ -49,10 +49,17 @@ module H2
 
           raise Error.new(42101, "Table #{statement.name} already exists")
         end
-        evaluator = Evaluator.new(@parameters)
+        evaluator = Evaluator.new(@parameters, queries: @queries)
         columns = statement.columns.map do |column|
           evaluator.validate(column.default)
-          column.default ? column.with(default: Literal.new(evaluator.evaluate(column.default))) : column
+          next column unless column.default
+
+          default = if evaluator.contains_subquery?(column.default)
+            CapturedExpression.new(column.default, @parameters.dup.freeze)
+          else
+            Literal.new(evaluator.evaluate(column.default))
+          end
+          column.with(default: default)
         end
         if statement.query
           result = @queries.execute(statement.query)
@@ -77,7 +84,7 @@ module H2
         target = table(statement.table).copy
         names = statement.columns || target.columns.map(&:name)
         target.validate_columns(names)
-        evaluator = Evaluator.new(@parameters)
+        evaluator = Evaluator.new(@parameters, queries: @queries)
         source_rows = if statement.query
           result = @queries.execute(statement.query)
           raise Error.new(21002, "Column count does not match query") unless result.columns.length == names.length
@@ -93,9 +100,9 @@ module H2
           supplied = expressions ? names.zip(expressions).to_h : {}
           row = target.columns.to_h do |column|
             expression = supplied.fetch(column.name, Default.new)
-            expression = column.default if expression.is_a?(Default)
-            evaluator.validate(expression)
-            [column.name, expression ? evaluator.evaluate(expression) : nil]
+            expression, value_evaluator = expression.is_a?(Default) ? default_expression(column, evaluator) : [expression, evaluator]
+            value_evaluator.validate(expression)
+            [column.name, value_evaluator.evaluate(expression)]
           end
           target.rows << target.convert_row(row)
         end
@@ -105,20 +112,19 @@ module H2
       def update(statement)
         target = table(statement.table).copy
         target.validate_columns(statement.assignments.map(&:first))
-        evaluator = Evaluator.new(@parameters, target.columns, [target.name])
+        evaluator = Evaluator.new(@parameters, target.columns, [target.name], queries: @queries)
         assignments = statement.assignments.map do |name, expression|
-          if expression.is_a?(Default)
-            expression = target.columns.find { it.name == name }.default || Literal.new(nil)
-          end
-          evaluator.validate(expression)
-          [name, expression]
+          column = target.columns.find { it.name == name }
+          expression, value_evaluator = expression.is_a?(Default) ? default_expression(column, evaluator) : [expression, evaluator]
+          value_evaluator.validate(expression)
+          [name, expression, value_evaluator]
         end
         evaluator.validate(statement.where)
         count = 0
         target.rows.map! do |row|
           next row unless matches?(evaluator, statement.where, row)
 
-          values = assignments.to_h { |name, expression| [name, evaluator.evaluate(expression, row)] }
+          values = assignments.to_h { |name, expression, value_evaluator| [name, value_evaluator.evaluate(expression, row)] }
           count += 1
           target.convert_row(row.merge(values))
         end
@@ -127,7 +133,7 @@ module H2
 
       def delete(statement)
         target = table(statement.table).copy
-        evaluator = Evaluator.new(@parameters, target.columns, [target.name])
+        evaluator = Evaluator.new(@parameters, target.columns, [target.name], queries: @queries)
         evaluator.validate(statement.where)
         before = target.rows.length
         target.rows.reject! { matches?(evaluator, statement.where, it) }
@@ -136,6 +142,14 @@ module H2
 
       def matches?(evaluator, expression, row, group = nil)
         expression.nil? || evaluator.boolean(evaluator.evaluate(expression, row, group)) == true
+      end
+
+      def default_expression(column, evaluator)
+        default = column.default
+        return [default || Literal.new(nil), evaluator] unless default.is_a?(CapturedExpression)
+
+        queries = Queries.new(@catalog, default.parameters)
+        [default.expression, Evaluator.new(default.parameters, queries: queries)]
       end
     end
   end

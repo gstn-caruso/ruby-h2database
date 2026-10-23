@@ -42,7 +42,10 @@ H2.connect do |connection|
     when "E" then {error: parts[1].to_i, state: parts[2]}
     when "Q"
       columns = parts.drop(1).map { decode.call(it) }
-      types = lines[1].split("\t").drop(1).map { type_names.fetch(decode.call(it), decode.call(it)) }
+      types = lines[1].split("\t").drop(1).map do |encoded|
+        type = decode.call(encoded)
+        type.start_with?("ROW(") ? "ROW" : type_names.fetch(type, type)
+      end
       rows = lines.drop(2).map do |line|
         line.split("\t").drop(1).each_with_index.map do |value, column|
           normalize.call(value == "N" ? nil : decode.call(value[1..]), types[column])

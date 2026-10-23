@@ -6,7 +6,7 @@ require_relative "support/upstream_script"
 class UpstreamTest < DatabaseTest
   ROOT = File.expand_path("../h2/src/test/org/h2/test/scripts", __dir__)
   COMPLETE_SCRIPTS = %w[datatypes/int.sql functions/string/upper.sql functions/string/lower.sql
-    functions/system/coalesce.sql functions/numeric/mod.sql].freeze
+    functions/system/coalesce.sql functions/numeric/mod.sql functions/system/nullif.sql].freeze
 
   COMPLETE_SCRIPTS.each do |path|
     define_method("test_complete_#{path.tr('/.', '__')}") do
@@ -31,10 +31,15 @@ class UpstreamTest < DatabaseTest
     script.cases.first(7).each { check_case(it) }
   end
 
-  def test_original_range_large_count_and_noncorrelated_queries
+  def test_original_range_queries_except_plans_and_parameter_block
     script = UpstreamScript.new(File.join(ROOT, "range_table.sql"))
-    check_case(script.cases.fetch(6))
+    [3, 5, 6, 7].each { check_case(script.cases.fetch(it)) }
     script.cases[8..39].each { check_case(it) }
+  end
+
+  def test_original_table_first_seven_statements
+    script = UpstreamScript.new(File.join(ROOT, "queries/table.sql"))
+    script.cases.first(7).each { check_case(it) }
   end
 
   private
@@ -62,7 +67,7 @@ class UpstreamTest < DatabaseTest
       assert_equal [expected.first], result.rows.first.map { text(it) }, location
     else
       spans = expected.fetch(1).enum_for(:scan, /-+/).map { Regexp.last_match.begin(0)...Regexp.last_match.end(0) }
-      assert_equal spans.map { expected.first[it].strip }, result.columns, location
+      assert_equal spans.map { expected.first[it].strip }, result.columns.map { text(it) }, location
       expected_rows = expected[2...-1].map { |line| spans.map { line[it].to_s.strip } }
       actual_rows = result.rows.map { |row| row.map { text(it) } }
       if expected.last.start_with?("rows (ordered):")
@@ -80,6 +85,7 @@ class UpstreamTest < DatabaseTest
     when true then "TRUE"
     when false then "FALSE"
     when BigDecimal then value.to_s("F")
+    when String then value.gsub("\r\n", "\n").tr("\n", " ").gsub(/ +/, " ")
     else value.to_s
     end
   end

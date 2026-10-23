@@ -8,11 +8,16 @@ module H2
         "UPPER" => 1..1, "UCASE" => 1..1, "LOWER" => 1..1, "LCASE" => 1..1, "LENGTH" => 1..1, "CHAR_LENGTH" => 1..1,
         "ABS" => 1..1, "COALESCE" => 1..Float::INFINITY, "NULLIF" => 2..2, "MOD" => 2..2}.freeze
 
-      attr_reader :scope
+      attr_reader :scope, :outer_bindings
 
-      def initialize(parameters, columns = [], qualifiers = [], scope: nil)
+      def initialize(parameters, columns = [], qualifiers = [], scope: nil, queries: nil)
         @parameters = parameters
         @scope = scope || Scope.for_columns(columns, qualifiers)
+        @queries = queries
+        @subqueries = {}
+        @outer_bindings = []
+        @group_correlations = []
+        @cases = {}
       end
 
       def validate(node, aggregates: false, inside_aggregate: false)
@@ -20,9 +25,21 @@ module H2
 
         case node
         when ColumnRef
-          scope.resolve(node)
+          binding = scope.resolve(node)
+          @outer_bindings << binding unless scope.local?(binding) || @outer_bindings.include?(binding)
         when Literal, Parameter, BoundColumn
           nil
+        when CaseExpression
+          expression, _type = prepared_case(node)
+          expressions = expression.is_a?(CaseExpression) ? case_children(expression) : [expression]
+          expressions.each { validate(it, aggregates: aggregates, inside_aggregate: inside_aggregate) }
+        when Subquery, Exists, InQuery
+          validate(node.expression, aggregates: aggregates, inside_aggregate: inside_aggregate) if node.is_a?(InQuery)
+          plan = subquery_plan(node)
+          Type.common([type_of(node.expression), query_type(plan)]) if node.is_a?(InQuery)
+          plan.outer_bindings.each do |binding|
+            @outer_bindings << binding unless scope.local?(binding) || @outer_bindings.include?(binding)
+          end
         when Function
           arity = FUNCTIONS[node.name]
           raise Error.new(50100, "Function #{node.name} not yet ported") unless arity
@@ -45,6 +62,9 @@ module H2
           raise Error.new(42000, "Invalid expression #{node.class.name.split('::').last}")
         else
           children(node).each { validate(it, aggregates: aggregates, inside_aggregate: inside_aggregate) }
+          if node.is_a?(Binary) && %w[= <> != < > <= >=].include?(node.operator)
+            Type.common([type_of(node.left), type_of(node.right)])
+          end
         end
       end
 
@@ -55,17 +75,48 @@ module H2
         children(node).any? { contains_aggregate?(it) }
       end
 
+      def contains_subquery?(node)
+        return true if node.is_a?(Subquery) || node.is_a?(Exists) || node.is_a?(InQuery)
+
+        children(node).any? { contains_subquery?(it) }
+      end
+
       def validate_grouping(node, groups)
         return unless node
         return if groups.any? { canonical(it) == canonical(node) }
         return if node.is_a?(Function) && AGGREGATES.include?(node.name)
+        if node.is_a?(Subquery) || node.is_a?(Exists) || node.is_a?(InQuery)
+          subquery_plan(node).outer_bindings.each do |binding|
+            @group_correlations << binding if scope.local?(binding) && !@group_correlations.include?(binding)
+          end
+          validate_grouping(node.expression, groups) if node.is_a?(InQuery)
+          return
+        end
 
         if node.is_a?(ColumnRef) || node.is_a?(BoundColumn)
+          binding = node.is_a?(BoundColumn) ? node.binding : scope.resolve(node)
+          return unless scope.local?(binding)
+
           name = node.is_a?(BoundColumn) ? node.binding.name : node.name
           raise Error.new(90016, "Column #{name} must be in GROUP BY")
         end
 
         children(node).each { validate_grouping(it, groups) }
+      end
+
+      def validate_group_correlations(group)
+        return if @group_correlations.empty?
+
+        first = group.first
+        return unless first
+
+        group.each do |row|
+          @group_correlations.each do |binding|
+            unless equals(first.fetch(binding.key), row.fetch(binding.key), null_safe: true)
+              raise Error.new(90016, "Correlated column #{binding.name} must be constant in its group")
+            end
+          end
+        end
       end
 
       def evaluate(node, row = {}, group = nil)
@@ -87,6 +138,38 @@ module H2
         when Predicate then predicate(node, row, group)
         when Cast then node.type.convert(evaluate(node.expression, row, group), cast: true)
         when Function then function(node, row, group)
+        when RowConstructor then RowValue.new(node.expressions.map { evaluate(it, row, group) })
+        when Subquery
+          plan = subquery_plan(node)
+          result = plan.execute(row, max_rows: 2)
+          raise Error.new(90053, "Scalar subquery contains more than one row") if result.rows.length > 1
+
+          values = result.rows.first || Array.new(plan.columns.length)
+          values.length == 1 ? values.first : RowValue.new(values)
+        when Exists then !subquery_plan(node).execute(row, max_rows: 1).rows.empty?
+        when InQuery
+          value = evaluate(node.expression, row, group)
+          plan = subquery_plan(node)
+          values = plan.execute(row).rows.map { it.length == 1 ? it.first : RowValue.new(it) }
+          return false if values.empty?
+          return nil if contains_null?(value)
+          if plan.columns.length == 1 && value.is_a?(RowValue)
+            value = value.values.first
+          end
+          return true if values.any? { equals(value, it) == true }
+
+          values.any? { contains_null?(it) } ? nil : false
+        when CaseExpression
+          expression, type = prepared_case(node)
+          return type.convert(evaluate(expression, row, group), cast: true) unless expression.is_a?(CaseExpression)
+
+          operand = evaluate(expression.operand, row, group) if expression.operand
+          branch = expression.branches.find do |condition, _value|
+            candidate = evaluate(condition, row, group)
+            expression.operand ? equals(operand, candidate) == true : boolean(candidate) == true
+          end
+          value = evaluate(branch ? branch.last : expression.fallback, row, group)
+          type.convert(value, cast: true)
         else raise Error.new(42000, "Invalid expression")
         end
       end
@@ -96,6 +179,17 @@ module H2
       end
 
       def compare(left, right)
+        return 0 if left.nil? && right.nil?
+        return -1 if left.nil?
+        return 1 if right.nil?
+        if left.is_a?(RowValue) || right.is_a?(RowValue)
+          left, right = row_pair(left, right)
+          left.values.zip(right.values).each do |a, b|
+            comparison = compare(a, b)
+            return comparison unless comparison.zero?
+          end
+          return 0
+        end
         if left.is_a?(Numeric) || right.is_a?(Numeric)
           left = numeric(left)
           right = numeric(right)
@@ -109,11 +203,28 @@ module H2
         result
       end
 
+      def equals(left, right, null_safe: false)
+        return null_safe ? left.nil? && right.nil? : nil if left.nil? || right.nil?
+        if left.is_a?(RowValue) || right.is_a?(RowValue)
+          left, right = row_pair(left, right)
+          results = left.values.zip(right.values).map { |a, b| equals(a, b, null_safe: null_safe) }
+          return false if results.include?(false)
+          return nil if results.include?(nil)
+
+          return true
+        end
+        compare(left, right).zero?
+      end
+
       def type_of(node)
         case node
         when ColumnRef then scope.resolve(node).type
         when BoundColumn then node.binding.type
         when Cast then node.type
+        when RowConstructor then RowType.new(node.expressions.map { type_of(it) })
+        when Subquery then query_type(subquery_plan(node))
+        when Exists, InQuery then Type.new("BOOLEAN", nil, nil)
+        when CaseExpression then prepared_case(node).last
         when Parameter then type_of(Literal.new(@parameters.fetch(node.index)))
         when Literal
           case node.value
@@ -131,6 +242,7 @@ module H2
           when String then Type.new("VARCHAR", node.value.length, nil)
           when true, false then Type.new("BOOLEAN", nil, nil)
           when nil then Type.new("NULL", nil, nil)
+          when RowValue then RowType.new(node.value.values.map { type_of(Literal.new(it)) })
           end
         when Unary then node.operator == "NOT" ? Type.new("BOOLEAN", nil, nil) : type_of(node.operand)
         when Predicate then Type.new("BOOLEAN", nil, nil)
@@ -154,11 +266,113 @@ module H2
         when Binary then [node.left, node.right]
         when Predicate, Function then node.arguments
         when Cast then [node.expression]
+        when RowConstructor then node.expressions
+        when CaseExpression
+          expression = prepared_case(node).first
+          expression.is_a?(CaseExpression) ? case_children(expression) : [expression]
         else []
         end
       end
 
       private
+
+      def case_children(node)
+        [node.operand, *node.branches.flatten, node.fallback].compact
+      end
+
+      def prepared_case(node)
+        @cases.fetch(node) do
+          validate(node.operand, aggregates: true) if node.operand
+          all_constant = !node.operand || constant?(node.operand)
+          operand = evaluate(node.operand) if node.operand && all_constant
+          types = []
+          node.branches.each do |condition, value|
+            validate(condition, aggregates: true)
+            validate(value, aggregates: true) unless node.operand
+            if all_constant
+              if constant?(condition)
+                candidate = evaluate(condition)
+                matched = node.operand ? equals(operand, candidate) == true : boolean(candidate) == true
+                if matched
+                  validate(value, aggregates: true)
+                  return @cases[node] = [value, type_of(value)]
+                end
+              else
+                all_constant = false
+              end
+            end
+            validate(value, aggregates: true) if node.operand
+            types << type_of(value)
+          end
+          validate(node.fallback, aggregates: true)
+          types << type_of(node.fallback)
+          if all_constant
+            type = node.fallback.is_a?(Literal) && node.fallback.value.nil? ? Type.common(types) : type_of(node.fallback)
+            @cases[node] = [node.fallback, type]
+          else
+            @cases[node] = [node, Type.common(types)]
+          end
+        end
+      end
+
+      def constant?(node)
+        case node
+        when Literal then true
+        when Unary, Binary, Predicate, Cast, RowConstructor then children(node).all? { constant?(it) }
+        when Function then FUNCTIONS.key?(node.name) && !AGGREGATES.include?(node.name) && children(node).all? { constant?(it) }
+        when CaseExpression
+          expression = prepared_case(node).first
+          !expression.is_a?(CaseExpression) && constant?(expression)
+        else false
+        end
+      end
+
+      def contains_null?(value)
+        value.nil? || (value.is_a?(RowValue) && value.values.any? { contains_null?(it) })
+      end
+
+      def subquery_plan(node)
+        raise Error.new(50100, "Subquery is not supported in this context") unless @queries
+
+        @subqueries[node] ||= @queries.prepare(node.query, outer_scope: scope)
+      end
+
+      def query_type(plan)
+        plan.types.length == 1 ? plan.types.first : RowType.new(plan.types)
+      end
+
+      def row_pair(left, right)
+        left = RowValue.new([left]) unless left.is_a?(RowValue)
+        right = RowValue.new([right]) unless right.is_a?(RowValue)
+        unless left.values.length == right.values.length
+          raise Error.new(21002, "Row column counts do not match")
+        end
+        [left, right]
+      end
+
+      def nullable_compare(left, right)
+        return nil if left.nil? || right.nil?
+        if left.is_a?(RowValue) || right.is_a?(RowValue)
+          left, right = row_pair(left, right)
+          left.values.zip(right.values).each do |a, b|
+            result = nullable_compare(a, b)
+            return result if result.nil? || !result.zero?
+          end
+          return 0
+        end
+        compare(left, right)
+      end
+
+      def in_values(value, candidates)
+        unknown = false
+        candidates.each do |candidate|
+          result = equals(value, candidate)
+          return true if result == true
+
+          unknown = true if result.nil?
+        end
+        unknown ? nil : false
+      end
 
       def canonical(node)
         case node
@@ -167,6 +381,10 @@ module H2
         when Binary then node.with(left: canonical(node.left), right: canonical(node.right))
         when Predicate, Function then node.with(arguments: node.arguments.map { canonical(it) })
         when Cast then node.with(expression: canonical(node.expression))
+        when RowConstructor then node.with(expressions: node.expressions.map { canonical(it) })
+        when CaseExpression
+          node.with(operand: node.operand && canonical(node.operand),
+            branches: node.branches.map { |condition, value| [canonical(condition), canonical(value)] }, fallback: canonical(node.fallback))
         else node
         end
       end
@@ -228,14 +446,25 @@ module H2
           return false
         end
         return nil if left.nil? || right.nil?
+        if %w[= <> != < > <= >=].include?(node.operator) && (left.is_a?(RowValue) ^ right.is_a?(RowValue))
+          raise Error.new(22018, "Cannot compare row and scalar values")
+        end
 
         case node.operator
-        when "=" then compare(left, right).zero?
-        when "<>", "!=" then !compare(left, right).zero?
-        when "<" then compare(left, right).negative?
-        when ">" then compare(left, right).positive?
-        when "<=" then compare(left, right) <= 0
-        when ">=" then compare(left, right) >= 0
+        when "=" then equals(left, right)
+        when "<>", "!="
+          result = equals(left, right)
+          result.nil? ? nil : !result
+        when "<", ">", "<=", ">="
+          comparison = nullable_compare(left, right)
+          return nil if comparison.nil?
+
+          case node.operator
+          when "<" then comparison.negative?
+          when ">" then comparison.positive?
+          when "<=" then comparison <= 0
+          when ">=" then comparison >= 0
+          end
         when "||" then (left.to_s + right.to_s).freeze
         else
           left, right = numeric(left), numeric(right)
@@ -262,27 +491,26 @@ module H2
         values = node.arguments.map { evaluate(it, row, group) }
         left, right, extra = values
         case node.operator
-        when :is then right.nil? ? left.nil? : boolean(left) == right
-        when :distinct, :not_distinct
-          equal = if left.nil? || right.nil?
-            left.nil? && right.nil?
+        when :is, :is_not
+          if right.nil? && left.is_a?(RowValue)
+            node.operator == :is ? left.values.all?(&:nil?) : left.values.none?(&:nil?)
           else
-            compare(left, right).zero?
+            result = right.nil? ? left.nil? : boolean(left) == right
+            node.operator == :is_not ? !result : result
           end
+        when :distinct, :not_distinct
+          equal = equals(left, right, null_safe: true)
           node.operator == :not_distinct ? equal : !equal
         when :between
-          low = left.nil? || right.nil? ? nil : compare(left, right) >= 0
-          high = left.nil? || extra.nil? ? nil : compare(left, extra) <= 0
+          lower_comparison = nullable_compare(left, right)
+          upper_comparison = nullable_compare(left, extra)
+          low = lower_comparison.nil? ? nil : lower_comparison >= 0
+          high = upper_comparison.nil? ? nil : upper_comparison <= 0
           return false if low == false || high == false
 
           low.nil? || high.nil? ? nil : true
         when :in
-          return nil if left.nil?
-
-          candidates = values.drop(1)
-          return true if candidates.compact.any? { compare(left, it).zero? }
-
-          candidates.include?(nil) ? nil : false
+          in_values(left, values.drop(1))
         when :like
           return nil if values.any?(&:nil?)
           raise Error.new(22025, "ESCAPE must be zero or one character") unless extra.is_a?(String) && extra.length <= 1
@@ -324,7 +552,7 @@ module H2
         values = node.arguments.map { evaluate(it, row, group) }
         first, second = values
         if node.name == "NULLIF"
-          return nil if !first.nil? && !second.nil? && compare(first, second).zero?
+          return nil if equals(first, second) == true
 
           return first
         end

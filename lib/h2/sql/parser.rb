@@ -6,7 +6,7 @@ module H2
       RESERVED = %w[ALL AND AS ASC BETWEEN BY CASE CAST CHECK CONSTRAINT CREATE CROSS DEFAULT DELETE DESC DISTINCT
         DROP ELSE END EXCEPT EXISTS FALSE FETCH FIRST FOREIGN FROM FULL GROUP HAVING IN INNER INSERT INTERSECT INTO
         IS JOIN KEY LEFT LIKE LIMIT NATURAL NEXT NOT NULL NULLS OFFSET ON ONLY OR ORDER OUTER PRIMARY REFERENCES
-        RIGHT ROW ROWS SELECT SET TABLE THEN TRUE UNION UNIQUE UPDATE USING VALUES WHEN WHERE WITH].freeze
+        RIGHT ROW ROWS SELECT SET TABLE THEN TRUE UNION UNIQUE UPDATE USING VALUE VALUES WHEN WHERE WITH].freeze
       PRECEDENCE = {"OR" => 1, "AND" => 2, "=" => 4, "<>" => 4, "!=" => 4, "<" => 4,
         ">" => 4, "<=" => 4, ">=" => 4, "||" => 5, "+" => 6, "-" => 6, "*" => 7, "/" => 7, "%" => 7}.freeze
       TYPE_NAMES = {"INT" => "INTEGER", "DECIMAL" => "NUMERIC", "DEC" => "NUMERIC", "BOOL" => "BOOLEAN",
@@ -450,8 +450,7 @@ module H2
             else
               target = take.value
               syntax("NULL, TRUE, or FALSE") unless %w[NULL TRUE FALSE].include?(target)
-              left = Predicate.new(:is, [left, Literal.new({"NULL" => nil, "TRUE" => true, "FALSE" => false}.fetch(target))])
-              left = Unary.new("NOT", left) if negate
+              left = Predicate.new(negate ? :is_not : :is, [left, Literal.new({"NULL" => nil, "TRUE" => true, "FALSE" => false}.fetch(target))])
             end
           elsif minimum <= 4 && predicate_start?
             negate = accept("NOT")
@@ -463,9 +462,14 @@ module H2
               Predicate.new(:between, [left, low, expression(5)])
             when "IN"
               expect("(")
-              arguments = list { expression }
+              if query_start?
+                predicate = InQuery.new(left, query)
+              else
+                arguments = keyword?(")") ? [] : list { expression }
+                predicate = Predicate.new(:in, [left, *arguments])
+              end
               expect(")")
-              Predicate.new(:in, [left, *arguments])
+              predicate
             when "LIKE"
               pattern = expression(5)
               escape = accept("ESCAPE") ? expression(5) : Literal.new("\\")
@@ -500,6 +504,18 @@ module H2
         when "TRUE" then Literal.new(true)
         when "FALSE" then Literal.new(false)
         when "DEFAULT" then Default.new
+        when "CASE"
+          operand = keyword?("WHEN") ? nil : expression
+          branches = []
+          while accept("WHEN")
+            condition = expression
+            expect("THEN")
+            branches << [condition, expression]
+          end
+          syntax("WHEN") if branches.empty?
+          fallback = accept("ELSE") ? expression : Literal.new(nil)
+          expect("END")
+          CaseExpression.new(operand, branches, fallback)
         when "?"
           node = Parameter.new(@parameter_count)
           @parameter_count += 1
@@ -507,8 +523,25 @@ module H2
         when "NOT" then Unary.new("NOT", expression(3))
         when "+", "-" then Unary.new(token.value, expression(8))
         when "*" then Star.new(nil)
+        when "EXISTS"
+          expect("(")
+          node = Exists.new(query)
+          expect(")")
+          node
+        when "ROW"
+          expect("(")
+          expressions = keyword?(")") ? [] : list { expression }
+          expect(")")
+          RowConstructor.new(expressions)
         when "("
-          node = expression
+          if query_start?
+            node = Subquery.new(query)
+          else
+            node = expression
+            if accept(",")
+              node = RowConstructor.new([node, *list { expression }])
+            end
+          end
           expect(")")
           node
         when "CAST"
