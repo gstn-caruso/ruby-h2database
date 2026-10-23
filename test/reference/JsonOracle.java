@@ -47,6 +47,15 @@ public class JsonOracle {
     public static void main(String[] arguments) throws Exception {
         try (Connection connection = DriverManager.getConnection("jdbc:h2:mem:json_values");
                 Statement commands = connection.createStatement()) {
+            if (arguments.length == 1 && arguments[0].equals("exponent-boundary")) {
+                System.out.println("J\t" + Runtime.version());
+                try (PreparedStatement statement = connection.prepareStatement("SELECT '1e2147483648' FORMAT JSON AS j")) {
+                    dump(statement);
+                } catch (SQLException error) {
+                    System.out.println("E\t" + error.getErrorCode() + "\t" + error.getSQLState());
+                }
+                return;
+            }
             try (PreparedStatement statement = connection.prepareStatement("SELECT CAST(? AS JSON) AS casted,? FORMAT JSON AS parsed,? IS JSON WITH UNIQUE KEYS AS valid,(? FORMAT JSON)[?] AS item,? IS OF(JSON) AS istype")) {
                 dump(statement, "x", "[1,null]", "{\"a\":1,\"a\":2}", "[1,null]", 2, ValueJson.NULL);
                 dump(statement, "[2]".getBytes(StandardCharsets.UTF_16LE), "{}".getBytes("UTF-32BE"), "[]".getBytes(StandardCharsets.UTF_8), null, 1, null);

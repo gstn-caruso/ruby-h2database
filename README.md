@@ -142,6 +142,8 @@ Quantified predicates work in filters, joins, grouped queries, DML and saved def
 
 `JSON` and `JSON(n)` store normalized UTF-8 JSON; `n` limits bytes, up to 1,000,000,000. Values retain object order, duplicate keys and decimal scale. Ruby results use immutable `H2::JsonValue` objects with `.bytes`, `.kind`, `.unique_keys?` and canonical `.to_s`. Bind an explicit value with `H2::JsonValue.parse(text_or_bytes)`.
 
+Numeric scale supports signed 32-bit limits. At the boundary `1e2147483648`, native JSON agrees with Java 25; Java 17 rejects the exponent. This reference-runtime difference is checked separately and documented in [MIGRATION.md](MIGRATION.md).
+
 ```ruby
 H2.connect do |connection|
   connection.execute("CREATE TABLE documents(id INT PRIMARY KEY, body JSON)")
