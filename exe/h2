@@ -1,0 +1,6 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "h2/cli"
+
+exit H2::CLI.new.run(ARGV)
