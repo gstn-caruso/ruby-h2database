@@ -2,7 +2,7 @@
 
 A native Ruby migration of the [H2 SQL database](https://h2database.com), targeting Ruby 3.4 and 4.0. The Ruby engine runs in-process without Java or another database engine.
 
-**The migration is in progress.** The current Ruby implementation provides an initial SQL engine in memory and a separate, file-backed MVStore API. MVStore reads and writes H2 format 3 maps with string and signed 64-bit integer codecs. SQL tables are not yet connected to this storage, and the port does not replace the complete Java engine. See [MIGRATION.md](MIGRATION.md) for the remaining scope and compatibility evidence.
+**The migration is in progress.** The current Ruby implementation provides an initial SQL engine in memory and a separate, file-backed MVStore API. MVStore reads and writes H2 format 3 maps, including initial SQL value, row, index and versioned-value codecs. The SQL executor is not yet connected to this storage, and the port does not replace the complete Java engine. See [MIGRATION.md](MIGRATION.md) for the remaining scope and compatibility evidence.
 
 ## Install and test
 
@@ -71,11 +71,22 @@ H2::MVStore::Store.open("counters.mv", read_only: true) do |store|
 end
 ```
 
-Maps support `[]`, `[]=`, `delete`, `size` and sorted enumeration. Keys and values default to `:string`; use `:long` for signed 64-bit integers. Specify the same codecs when reopening a map: H2's raw MVStore catalog does not store these builder choices. String keys follow Java's UTF-16 ordering. Inputs are copied and returned strings are frozen.
+Maps support `[]`, `[]=`, `delete`, `size` and sorted enumeration. Raw map keys and values default to `:string`; use `:long` for signed 64-bit integers, `:bytes` for binary strings, and `:value` for typed SQL storage values. Specify the same codecs when reopening a raw map: its catalog does not store these builder choices. Maps in H2's transaction store can resolve their codecs from the file's type registry automatically. String keys follow Java's UTF-16 ordering, and typed keys use their storage comparator, including decimal keys with equivalent values but different scales. Inputs are copied and returned strings are frozen.
+
+```ruby
+H2::MVStore::Store.open("values.mv") do |store|
+  values = store.open_map("values", key_type: :long, value_type: :value)
+  values[1] = H2::MVStore::Value.new(:numeric, H2::MVStore::Decimal.new(12500, 4))
+end
+```
+
+`Value#type` preserves SQL type identity, `#data` exposes its immutable storage representation, and `#to_ruby` converts initial scalars and nested collections. `Decimal` retains both the unscaled integer and scale. Temporal values currently expose H2's packed date/nanosecond/offset fields; LOB references retain identifiers and lengths without fetching external content. These codecs do not add their types to the SQL parser or expression evaluator.
+
+Existing `table.<object_id>` and `index.<object_id>` maps can be opened with inferred registered codecs. Table entries contain `VersionedValue` objects with `current`, `committed`, `operation_id` and `entry_id`; current row fields are in `SearchRow#values`. This is low-level access: callers editing these maps must maintain table/index consistency. `H2.connect` still creates an in-memory SQL database.
 
 `commit` appends a chunk and synchronizes it before publishing the duplicated file headers. `rollback` restores the last commit; handles for maps created after that commit become invalid. Closing a writable store commits pending changes, including the block form. Compression options are `:none`, `:fast` (LZF) and `:high` (DEFLATE). Read-only opens share a lock; a writable open excludes other readers and writers, including Java processes. File locking currently requires 64-bit Linux on x86_64 or aarch64; local and CI verification use x86_64.
 
-`H2::MVStore::Error#code` exposes MVStore error numbers, separately from SQL errors: 2 for write failures/read-only mutation, 4 for closed handles, 5 for unsupported formats or codecs, 6 for corruption, and 7 for conflicting locks. The API can inspect map names in an existing `.mv.db` file, but SQL value serialization, transaction maps, encryption, compaction and SQL database reopening remain pending. Opened maps currently materialize their entries, and each changed map is rewritten on commit.
+`H2::MVStore::Error#code` exposes MVStore error numbers, separately from SQL errors: 2 for write failures/read-only mutation, 4 for closed handles, 5 for unsupported formats or codecs, 6 for corruption, and 7 for conflicting locks. Full transaction-store behavior, SQL database lifecycle, collations, encryption, external LOB content and compaction remain pending. Some typed-key comparisons, including non-ASCII case-insensitive strings and zoned temporal/interval keys, explicitly fail as unsupported. Opened maps currently materialize sorted entries and use binary search; each changed map is rewritten on commit.
 
 ## SQL and command line
 
@@ -98,7 +109,7 @@ mvn -q -f h2/pom.xml -DskipTests package
 bundle exec rake test:reference
 ```
 
-This checks the relational and subquery SQL fixtures against both engines, including result labels, type names, rows, update counts, errors and SQL states. It also cross-reads and cross-writes MVStore files with all three compression modes, checks B-tree lookups, preserves unopened maps, verifies file locks in both directions, and recovers a commit after process death. Java is used only by this optional reference check; the Ruby runtime and native test suite do not require it. CI runs the reference comparison separately on Ruby 3.4 and 4.0.
+This checks the relational and subquery SQL fixtures against both engines, including result labels, type names, rows, update counts, errors and SQL states. It also cross-reads and cross-writes MVStore files with all three compression modes, checks B-tree lookups, preserves unopened maps, verifies file locks in both directions, and recovers a commit after process death. SQL storage checks read 180 rows with 18 columns and two indexes, modify a row/index from Ruby, reopen through JDBC, and preserve pending transaction data so Java can recover it. Java is used only by this optional reference check; the Ruby runtime and native test suite do not require it. CI runs the reference comparison separately on Ruby 3.4 and 4.0.
 
 ## Upstream and license
 

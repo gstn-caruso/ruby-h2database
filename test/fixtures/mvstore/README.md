@@ -1,12 +1,15 @@
 # MVStore reference fixtures
 
-These files were generated from the preserved Java engine at upstream commit `41d021b3e`, version `2.5.259-SNAPSHOT`, using `test/reference/MVStoreOracle.java`. They are test data, not user databases. Native tests only open them read-only; mutation tests use temporary copies or newly generated stores.
+These files were generated from the preserved Java engine at upstream commit `41d021b3e`, version `2.5.259-SNAPSHOT`, using `test/reference/MVStoreOracle.java` and `test/reference/SQLStorageOracle.java`. They are test data, not user databases. Native tests only open them read-only; mutation tests use temporary copies or newly generated stores.
 
 - `primitives.tsv`: 50 vectors for variable-length integers, UTF-16 strings, encoded page lengths and Fletcher32 checksums. String inputs are represented as UTF-16 code-unit hex, including isolated surrogates.
 - `java-0.mv`: two string/long maps, two commits, without compression.
 - `java-1.mv`: the same records with LZF compression.
 - `java-2.mv`: the same records with DEFLATE compression.
-- `java-sql.mv.db`: a JDBC-created table, primary key, secondary index and one row, used to verify parsing of SQL database map catalogs. Native decoding of SQL rows remains pending.
+- `java-sql.mv.db`: a JDBC-created table, primary key, secondary index and one row, used to verify SQL catalogs, inferred codecs, table fields and index rows.
+- `sql-values.tsv`: 156 canonical SQL value vectors, including numeric boundaries/scales, Unicode, floats, binary and structured values, temporal fields, intervals and LOB forms.
+- `sql-codecs.tsv`: 13 metadata vectors for stateless, value, row and versioned codecs, plus known unported descriptors.
+- `java-pending.mv`: committed records followed by an interrupted update/delete/insert transaction, with current/committed values, operation ids, entry ids and preserved undo logs.
 
 From the repository root, with a JDK configured:
 
@@ -22,3 +25,5 @@ java -cp h2/target/h2-2.5.259-SNAPSHOT.jar test/reference/MVStoreOracle.java cre
 ```
 
 Generate a SQL fixture with `sql /tmp/java-sql`; H2 creates `/tmp/java-sql.mv.db`. Copy newly generated files into this directory deliberately, since headers contain creation timestamps and regeneration changes binary bytes. `bundle exec rake test:reference` creates fresh stores in a temporary directory and checks cross-engine reads, writes, compression, locks and recovery without replacing these fixtures.
+
+`SQLStorageOracle.java` provides `vectors` and `meta-vectors` for the corresponding TSV files, and `create-pending /tmp/java-pending.mv` for a fresh interrupted-transaction fixture. Its `create-sql /tmp/typed-sql` command creates the larger 180-row/18-column database used by `test/reference/sql_storage.rb`; that database is generated during the reference check rather than checked in. Regenerate TSV files through a temporary output file and replace a fixture only after Java exits successfully.

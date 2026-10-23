@@ -27,11 +27,13 @@ module H2
         flags = buffer.byte
         raise Error.new(6, "Page node type mismatch") unless (flags & 1) == DataUtils.page_type(position)
         raise Error.new(5, "Unknown page flags #{flags}") unless (flags & ~7).zero?
-        raise Error.new(6, "Invalid page key count") unless count >= 0 && count <= buffer.remaining
+        raise Error.new(6, "Invalid page key count") if count.negative?
 
         children = []
         counts = []
         if (flags & 1) == 1
+          raise Error.new(6, "Truncated node references") if (count + 1) * 9 > buffer.remaining
+
           children = Array.new(count + 1) { buffer.uint64 }
           counts = Array.new(count + 1) { DataUtils.read_var_long(buffer) }
           raise Error.new(6, "Negative descendant count") if counts.any?(&:negative?)
@@ -43,11 +45,13 @@ module H2
           compressed = buffer.read(buffer.remaining)
           buffer = Buffer.new(Compression.expand(compressed, compressed.bytesize + addition, flags))
         end
-        keys = Array.new(count) { key_type.read(buffer) }
+        raise Error.new(6, "Invalid page key count") unless count <= buffer.remaining || count <= 1
+
+        keys = key_type.read_many(buffer, count)
         unless keys.each_cons(2).all? { key_type.compare(_1, _2).negative? }
           raise Error.new(6, "Page keys are not strictly ordered")
         end
-        values = (flags & 1).zero? ? Array.new(count) { value_type.read(buffer) } : []
+        values = (flags & 1).zero? ? value_type.read_many(buffer, count) : []
         raise Error.new(6, "Trailing page payload") unless buffer.remaining.zero?
 
         new(keys.freeze, values.freeze, children.freeze, counts.freeze, number, flags)
@@ -56,8 +60,8 @@ module H2
       def self.encode(keys:, values:, children:, counts:, number:, map_id:, chunk_id:, offset:, key_type:, value_type:, compression:)
         type = children.empty? ? 0 : 1
         payload = Buffer.new
-        keys.each { key_type.write(payload, it) }
-        values.each { value_type.write(payload, it) } if type.zero?
+        key_type.write_many(payload, keys)
+        value_type.write_many(payload, values) if type.zero?
         bytes = payload.data
         compressed, flags = Compression.compress(bytes, compression)
         if flags != 0 && compressed.bytesize < bytes.bytesize

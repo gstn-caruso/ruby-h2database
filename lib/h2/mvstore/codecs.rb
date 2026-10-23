@@ -3,7 +3,18 @@
 module H2
   module MVStore
     module Codecs
+      module Type
+        def read_many(buffer, count)
+          Array.new(count) { read(buffer) }
+        end
+
+        def write_many(buffer, values)
+          values.each { write(buffer, it) }
+        end
+      end
+
       class StringType
+        include Type
         def units(value)
           raise ArgumentError, "Expected String" unless value.is_a?(String)
           if [Encoding::UTF_16BE, Encoding::UTF_16LE].include?(value.encoding) && value.bytesize.odd?
@@ -29,6 +40,10 @@ module H2
         def write(buffer, value)
           characters = units(value)
           DataUtils.write_var_int(buffer, characters.length)
+          write_units(buffer, characters)
+        end
+
+        def write_units(buffer, characters)
           characters.each do |char|
             if char < 0x80
               buffer.put_byte(char)
@@ -42,6 +57,10 @@ module H2
 
         def read(buffer)
           length = DataUtils.read_var_int(buffer)
+          read_units(buffer, length)
+        end
+
+        def read_units(buffer, length)
           raise Error.new(6, "Invalid string length") unless length >= 0 && length <= buffer.remaining
 
           characters = Array.new(length) do
@@ -71,6 +90,7 @@ module H2
       end
 
       class LongType
+        include Type
         def copy(value)
           unless value.is_a?(Integer) && (-(1 << 63)...(1 << 63)).cover?(value)
             raise ArgumentError, "Expected signed 64-bit Integer"
@@ -97,7 +117,10 @@ module H2
       TYPES = {string: STRING, long: LONG}.freeze
 
       def self.fetch(name)
-        return name if name == STRING || name == LONG
+        return name if name.is_a?(Type)
+        return VALUE if name == :value
+        return META if name == :meta
+        return BYTES if name == :bytes
 
         TYPES.fetch(name) { raise Error.new(5, "Data type #{name.inspect} has not been ported") }
       end
